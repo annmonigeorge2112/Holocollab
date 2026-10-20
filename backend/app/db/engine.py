@@ -10,9 +10,13 @@ def get_database_url() -> str:
     elif url.startswith("postgresql://") and not url.startswith("postgresql+asyncpg://"):
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
     
-    # asyncpg requires ssl=require, not sslmode=require
+    # Clean query parameters for asyncpg:
+    # 1. asyncpg requires ssl=require, not sslmode=require
     if "sslmode=require" in url:
         url = url.replace("sslmode=require", "ssl=require")
+    # 2. asyncpg does not support channel_binding query parameter
+    if "channel_binding=require" in url:
+        url = url.replace("&channel_binding=require", "").replace("channel_binding=require&", "").replace("channel_binding=require", "")
     return url
 
 DATABASE_URL = get_database_url()
