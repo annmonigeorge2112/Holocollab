@@ -147,6 +147,12 @@ export const LoginPage: React.FC = () => {
             Register now
           </Link>
         </p>
+
+        <div className="text-center mt-4">
+          <Link to="/" className="text-xs text-purple-400/70 hover:text-purple-300 transition-colors inline-flex items-center gap-1">
+            ← Back to home
+          </Link>
+        </div>
       </div>
     </div>
   );
