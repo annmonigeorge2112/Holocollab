@@ -1,0 +1,94 @@
+import { io, Socket } from 'socket.io-client';
+import { ClientToServerEvents, ServerToClientEvents } from '../types/events';
+
+export type TypedSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
+
+export class SocketManager {
+  private static instance: SocketManager;
+  private socket: TypedSocket | null = null;
+  private currentToken: string | null = null;
+  private currentUrl: string | null = null;
+
+  public static getInstance(): SocketManager {
+    if (!SocketManager.instance) {
+      SocketManager.instance = new SocketManager();
+    }
+    return SocketManager.instance;
+  }
+
+  public connect(token: string, serverUrl?: string): TypedSocket {
+    const url = serverUrl || import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+    if (this.socket && this.socket.connected && this.currentToken === token && this.currentUrl === url) {
+      return this.socket;
+    }
+
+    if (this.socket) {
+      this.socket.disconnect();
+      this.socket = null;
+    }
+
+    this.currentToken = token;
+    this.currentUrl = url;
+
+    this.socket = io(url, {
+      path: '/socket.io',
+      auth: { token },
+      extraHeaders: {
+        Authorization: `Bearer ${token}`,
+      },
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
+    }) as TypedSocket;
+
+    return this.socket;
+  }
+
+  public disconnect(): void {
+    if (this.socket) {
+      this.socket.disconnect();
+      this.socket = null;
+      this.currentToken = null;
+      this.currentUrl = null;
+    }
+  }
+
+  public getSocket(): TypedSocket | null {
+    return this.socket;
+  }
+
+  public isConnected(): boolean {
+    return Boolean(this.socket?.connected);
+  }
+
+  public emit<K extends keyof ClientToServerEvents | (string & {})>(
+    event: K,
+    ...args: K extends keyof ClientToServerEvents ? Parameters<ClientToServerEvents[K]> : any[]
+  ): void {
+    if (this.socket) {
+      (this.socket as any).emit(event as string, ...args);
+    }
+  }
+
+  public on<K extends keyof ServerToClientEvents | (string & {})>(
+    event: K,
+    listener: K extends keyof ServerToClientEvents ? ServerToClientEvents[K] : (...args: any[]) => void
+  ): void {
+    if (this.socket) {
+      (this.socket as any).on(event as string, listener as any);
+    }
+  }
+
+  public off<K extends keyof ServerToClientEvents | (string & {})>(
+    event: K,
+    listener?: K extends keyof ServerToClientEvents ? ServerToClientEvents[K] : (...args: any[]) => void
+  ): void {
+    if (this.socket) {
+      (this.socket as any).off(event as string, listener as any);
+    }
+  }
+}
+
+export const socketManager = SocketManager.getInstance();
