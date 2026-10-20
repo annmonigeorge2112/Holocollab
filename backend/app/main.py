@@ -56,5 +56,11 @@ app.include_router(ai_router)
 async def health():
     return {"status": "ok"}
 
-# Mount Socket.IO app at /socket.io
-sio_app = socketio.ASGIApp(socketio_server=sio, other_asgi_app=app, socketio_path="socket.io")
+sio_asgi = socketio.ASGIApp(socketio_server=sio, other_asgi_app=app, socketio_path="socket.io")
+sio_app = CORSMiddleware(
+    app=sio_asgi,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
