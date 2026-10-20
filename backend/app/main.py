@@ -29,10 +29,12 @@ app = FastAPI(title="HoloCollab EduMeet API", lifespan=lifespan)
 # Global exception handler: sanitize unexpected errors to prevent stack traces leaking in production
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc: Exception):
-    logger.error("Unhandled internal server error: %s", type(exc).__name__)
+    import traceback
+    err_str = f"{type(exc).__name__}: {str(exc)}\n{traceback.format_exc()}"
+    logger.error("Unhandled internal server error: %s", err_str)
     return JSONResponse(
         status_code=500,
-        content={"detail": "An internal server error occurred. Please try again later."}
+        content={"detail": err_str}
     )
 
 app.add_middleware(
