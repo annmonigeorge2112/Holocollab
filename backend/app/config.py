@@ -40,8 +40,8 @@ class Settings(BaseSettings):
             if origins:
                 return origins
         if self.ENVIRONMENT == "production":
-            return [self.FRONTEND_ORIGIN.strip()] if self.FRONTEND_ORIGIN else []
-        return [self.FRONTEND_ORIGIN.strip(), "http://localhost:5173", "http://127.0.0.1:5173"]
+            return ["*"] if not self.FRONTEND_ORIGIN else [self.FRONTEND_ORIGIN.strip(), "http://localhost:5173", "http://127.0.0.1:5173"]
+        return ["*"]
 
 settings = Settings()
 
