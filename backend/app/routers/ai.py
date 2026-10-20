@@ -62,8 +62,30 @@ def check_rate_limit(user_id: str):
     if not ai_service.rate_limiter.check_and_record(user_id):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="You have exceeded the request limit (10 requests/minute). Please wait a moment before asking again.",
+            detail={"detail": "You have exceeded the request limit (10 requests/minute). Please wait a moment before asking again.", "code": "rate_limited"},
         )
+
+def standardize_ai_error(e: Exception) -> HTTPException:
+    err_str = str(e).lower()
+    if isinstance(e, ValueError) and "gemini_api_key is not configured" in err_str:
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"detail": "Gemini API key is not configured in backend environment.", "code": "missing_key"},
+        )
+    if "404" in err_str or "not found" in err_str or "model" in err_str and ("invalid" in err_str or "unsupported" in err_str):
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"detail": "Configured Gemini model is invalid or unsupported.", "code": "bad_model"},
+        )
+    if "429" in err_str or "quota" in err_str or "resource_exhausted" in err_str:
+        return HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"detail": "AI service is currently rate limited or busy. Please wait a few seconds and try again.", "code": "rate_limited"},
+        )
+    return HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail={"detail": f"Upstream Gemini error: {type(e).__name__}", "code": "upstream_error"},
+    )
 
 @router.post("/chat", response_model=AIChatResponse)
 async def chat_with_ai(
@@ -118,16 +140,7 @@ async def chat_with_ai(
             raw_reply = await ai_service.chat(session_context=context, message=req.message)
             ai_service.cache.set("chat", cache_key, raw_reply)
         except Exception as e:
-            err_str = str(e).lower()
-            if "429" in err_str or "quota" in err_str:
-                raise HTTPException(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail="AI service is currently busy. Please wait a few seconds and try again.",
-                )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Unable to generate AI reply. Please try again.",
-            )
+            raise standardize_ai_error(e)
 
     # AI command mode: check for [[HIGHLIGHT: part_name]]
     highlight_match = re.search(r"\[\[HIGHLIGHT:\s*([^\]]+)\]\]", raw_reply, re.IGNORECASE)
@@ -172,16 +185,7 @@ async def generate_summary(
         summary_text = await ai_service.class_summary(transcript=transcript, topic=topic)
         return AISummaryResponse(summary=summary_text)
     except Exception as e:
-        err_str = str(e).lower()
-        if "429" in err_str or "quota" in err_str:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="AI service rate limit reached. Please try again in a minute.",
-            )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to generate session summary.",
-        )
+        raise standardize_ai_error(e)
 
 @router.post("/quiz", response_model=AIQuizResponse)
 async def generate_quiz(
@@ -194,13 +198,12 @@ async def generate_quiz(
         quiz_data = await ai_service.generate_quiz(topic=req.topic, count=req.count)
         return AIQuizResponse(quiz=quiz_data)
     except Exception as e:
-        err_str = str(e).lower()
-        if "429" in err_str or "quota" in err_str:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Rate limit reached for quiz generation. Please wait a minute and retry.",
-            )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to generate quiz.",
-        )
+        raise standardize_ai_error(e)
+
+@router.get("/health")
+async def ai_health(current_user: User = Depends(get_current_user)):
+    try:
+        await ai_service.generate_content("Reply with OK")
+        return {"ok": True}
+    except Exception as e:
+        raise standardize_ai_error(e)

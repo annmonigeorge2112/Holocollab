@@ -159,7 +159,7 @@ async def get_session_report(
         created_at = created_at.replace(tzinfo=timezone.utc)
     end_time = session.ended_at or datetime.now(timezone.utc)
     if end_time.tzinfo is None:
-        end_time = end_time.replace(timezone.utc)
+        end_time = end_time.replace(tzinfo=timezone.utc)
 
     duration = max(0, int((end_time - created_at).total_seconds())) if created_at else 0
 

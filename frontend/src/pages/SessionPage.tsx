@@ -362,10 +362,16 @@ export const SessionPage: React.FC = () => {
         ...prev,
         { answer: res.reply, timestamp: new Date().toISOString() },
       ]);
-    } catch {
+    } catch (err: any) {
+      let msg = 'Gemini is unavailable right now.';
+      if (err?.data?.detail) {
+        msg = typeof err.data.detail === 'string' ? err.data.detail : (err.data.detail.detail || msg);
+      } else if (err?.message) {
+        msg = err.message;
+      }
       setGeminiResponses((prev) => [
         ...prev,
-        { answer: 'Gemini is unavailable right now.', timestamp: new Date().toISOString() },
+        { answer: `⚠️ ${msg}`, timestamp: new Date().toISOString() },
       ]);
     } finally {
       setGeminiLoading(false);

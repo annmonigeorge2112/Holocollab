@@ -76,9 +76,12 @@ class AIService:
         self.max_prompt_length = 3000
 
     def get_client(self) -> genai.Client:
-        if not self.client:
-            api_key = getattr(settings, "GEMINI_API_KEY", "") or ""
+        api_key = (getattr(settings, "GEMINI_API_KEY", "") or "").strip()
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY is not configured. Please set GEMINI_API_KEY in your environment.")
+        if not self.client or getattr(self, "_current_key", None) != api_key:
             self.client = genai.Client(api_key=api_key)
+            self._current_key = api_key
         return self.client
 
     async def _call_gemini_with_retry(

@@ -14,14 +14,10 @@ from app.db.engine import get_db
 from app.services.ai_service import ai_service, AIService
 from app.routers.auth import create_access_token
 from app.realtime.socket import sio
+import app.db.engine as engine_module
 
-TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
-
-test_engine = create_async_engine(
-    TEST_DATABASE_URL,
-    connect_args={"check_same_thread": False},
-)
-async_session_factory = async_sessionmaker(test_engine, expire_on_commit=False, class_=AsyncSession)
+from tests.test_realtime import test_engine, async_session_factory
+engine_module.async_session_maker = async_session_factory
 
 @pytest_asyncio.fixture(scope="function")
 async def db_session():
@@ -71,7 +67,9 @@ async def test_ai_rate_limit(client: AsyncClient, db_session: AsyncSession):
         json={"sessionId": "test-session", "message": "What is this engine?"},
     )
     assert res.status_code == 429
-    assert "limit" in res.json()["detail"].lower()
+    detail_data = res.json()["detail"]
+    msg_str = detail_data["detail"] if isinstance(detail_data, dict) else detail_data
+    assert "limit" in msg_str.lower()
 
 @pytest.mark.asyncio
 async def test_ai_cache_hit(client: AsyncClient, db_session: AsyncSession):
@@ -159,3 +157,56 @@ async def test_ai_highlight_tag_stripped_and_emitted(client: AsyncClient, db_ses
             {"name": "Crankcase", "by": "Gemini AI"},
             room=session_obj.id,
         )
+
+@pytest.mark.asyncio
+async def test_ai_health_normal_reply(client: AsyncClient, db_session: AsyncSession):
+    user = User(name="User", email="health_ok@test.com", password_hash="hash", role="student")
+    db_session.add(user)
+    await db_session.commit()
+    token = create_access_token(user.id, user.role)
+
+    with patch.object(ai_service, "generate_content", new=AsyncMock(return_value="OK")):
+        res = await client.get("/ai/health", headers={"Authorization": f"Bearer {token}"})
+        assert res.status_code == 200
+        assert res.json() == {"ok": True}
+
+@pytest.mark.asyncio
+async def test_ai_health_missing_key(client: AsyncClient, db_session: AsyncSession):
+    user = User(name="User", email="health_nokey@test.com", password_hash="hash", role="student")
+    db_session.add(user)
+    await db_session.commit()
+    token = create_access_token(user.id, user.role)
+
+    with patch("app.services.ai_service.settings.GEMINI_API_KEY", ""):
+        ai_service.client = None
+        res = await client.get("/ai/health", headers={"Authorization": f"Bearer {token}"})
+        assert res.status_code == 503
+        data = res.json()
+        assert data["detail"]["code"] == "missing_key"
+
+@pytest.mark.asyncio
+async def test_ai_health_bad_model(client: AsyncClient, db_session: AsyncSession):
+    user = User(name="User", email="health_badmodel@test.com", password_hash="hash", role="student")
+    db_session.add(user)
+    await db_session.commit()
+    token = create_access_token(user.id, user.role)
+
+    with patch.object(ai_service, "generate_content", side_effect=Exception("Model gemini-invalid not found (404)")):
+        res = await client.get("/ai/health", headers={"Authorization": f"Bearer {token}"})
+        assert res.status_code == 400
+        data = res.json()
+        assert data["detail"]["code"] == "bad_model"
+
+@pytest.mark.asyncio
+async def test_ai_health_rate_limited(client: AsyncClient, db_session: AsyncSession):
+    user = User(name="User", email="health_429@test.com", password_hash="hash", role="student")
+    db_session.add(user)
+    await db_session.commit()
+    token = create_access_token(user.id, user.role)
+
+    with patch.object(ai_service, "generate_content", side_effect=Exception("429 ResourceExhausted quota exceeded")):
+        res = await client.get("/ai/health", headers={"Authorization": f"Bearer {token}"})
+        assert res.status_code == 429
+        data = res.json()
+        assert data["detail"]["code"] == "rate_limited"
+

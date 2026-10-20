@@ -175,3 +175,28 @@ async def test_report_gemini_failure_fallback(client: AsyncClient, db_session: A
         data = res_report.json()
         assert len(data["aiInsight"]) > 20
         assert "engagement" in data["aiInsight"].lower()
+
+@pytest.mark.asyncio
+async def test_report_endpoint_timezone_utc(client: AsyncClient, db_session: AsyncSession):
+    """Test get_session_report works cleanly when session.ended_at is None and datetimes are tz-aware."""
+    host_token, _ = await get_token_for(client, "tz_host@example.com", "educator", "Host TZ")
+    res = await client.post(
+        "/sessions",
+        headers={"Authorization": f"Bearer {host_token}"},
+        json={"name": "Timezone Test Session", "topic": "Physics"},
+    )
+    assert res.status_code == 201
+    session_id = res.json()["id"]
+
+    # Call report endpoint
+    res_report = await client.get(
+        f"/sessions/{session_id}/report",
+        headers={"Authorization": f"Bearer {host_token}"},
+    )
+    assert res_report.status_code == 200
+    data = res_report.json()
+    assert data["sessionId"] == session_id
+    assert isinstance(data["durationSeconds"], int)
+    assert data["durationSeconds"] >= 0
+    assert "rating" in data
+
