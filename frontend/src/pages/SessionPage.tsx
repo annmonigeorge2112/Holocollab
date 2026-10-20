@@ -21,6 +21,7 @@ import { useGestureSession } from '../hooks/useGestureSession';
 import { HandOverlay } from '../components/HandOverlay';
 import {
   Users,
+  Box,
   MessageSquare,
   Bot,
   PenLine,
@@ -76,8 +77,8 @@ export const SessionPage: React.FC = () => {
   const [assets, setAssets] = useState<AssetItem[]>([]);
   const [uploading, setUploading] = useState(false);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
-  const [currentModelUrl, setCurrentModelUrl] = useState(SAMPLE_MODELS[0].url);
-  const [currentSlideIdx, setCurrentSlideIdx] = useState(0);
+  const [currentModelUrl, setCurrentModelUrl] = useState<string>('');
+  const [currentSlideIdx, setCurrentSlideIdx] = useState(-1);
 
   // Whiteboard
   const [whiteboardActive, setWhiteboardActive] = useState(false);
@@ -321,6 +322,10 @@ export const SessionPage: React.FC = () => {
   );
 
   useEffect(() => {
+    if (!currentModelUrl) {
+      setCurrentSlideIdx(-1);
+      return;
+    }
     const idx = allModels.findIndex((m) => m.url === currentModelUrl);
     if (idx >= 0) setCurrentSlideIdx(idx);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -480,7 +485,7 @@ export const SessionPage: React.FC = () => {
         <div className="absolute inset-0 z-10">
           <ARSceneComponent
             ref={arRef}
-            modelUrl={currentModelUrl}
+            modelUrl={currentModelUrl || undefined}
             enableCamera={false}
             onTransformChange={onLocalTransformChange}
             onInteractionEnd={onLocalInteractionEnd}
@@ -488,6 +493,29 @@ export const SessionPage: React.FC = () => {
             onFilterChange={onLocalFilterChange}
             className="w-full h-full"
           />
+
+          {!currentModelUrl && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center p-6 bg-slate-950/60 backdrop-blur-sm z-15 pointer-events-auto">
+              <div className="max-w-md text-center p-8 rounded-3xl bg-slate-900/80 border border-purple-500/30 shadow-2xl">
+                <Box className="w-12 h-12 text-purple-400 mx-auto mb-4 animate-bounce" />
+                <h3 className="text-lg font-bold text-white mb-2">No 3D Model Loaded</h3>
+                <p className="text-sm text-slate-300 mb-6">
+                  {isHost
+                    ? 'Start the lesson by selecting a 3D model for all participants to explore.'
+                    : 'Waiting for the host to pick a model...'}
+                </p>
+                {isHost && (
+                  <button
+                    onClick={() => setSidePanel('models')}
+                    className="inline-flex items-center gap-2 px-6 py-3 rounded-2xl bg-purple-600 hover:bg-purple-500 text-white font-semibold text-sm shadow-lg shadow-purple-600/30 transition-all hover:scale-105 active:scale-95"
+                  >
+                    <Box className="w-4 h-4" />
+                    <span>Choose a model</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Z-ORDER LAYER 20: Whiteboard Canvas Overlay */}

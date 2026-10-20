@@ -12,7 +12,6 @@ import {
   LabelInfo,
   formatPartName,
 } from '../services/ARScene';
-import { DEFAULT_MODEL_URL } from '../constants/models';
 import { RotateCcw, Activity, X } from 'lucide-react';
 
 export interface ARSceneHandle {
@@ -40,7 +39,7 @@ interface ARSceneProps {
 export const ARSceneComponent = forwardRef<ARSceneHandle, ARSceneProps>(
   (
     {
-      modelUrl = DEFAULT_MODEL_URL,
+      modelUrl,
       enableCamera = true,
       onTransformChange,
       onPartSelect,
