@@ -14,6 +14,7 @@ import {
   ParticipantsUpdatePayload,
   ServerMediaStatePayload,
   ServerGestureEventPayload,
+  ServerScreenSharePayload,
 } from '../types/events';
 import { useMediaSession } from '../hooks/useMediaSession';
 import { VideoGrid } from '../components/VideoGrid';
@@ -39,6 +40,9 @@ import {
   Check,
   RotateCcw,
   AlertCircle,
+  Monitor,
+  MonitorOff,
+  RefreshCw,
 } from 'lucide-react';
 
 interface SessionMeta {
@@ -98,13 +102,17 @@ export const SessionPage: React.FC = () => {
   const [copiedCode, setCopiedCode] = useState(false);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
 
+  // Screen Share Presenter State
+  const [activePresenter, setActivePresenter] = useState<{ userId: string; name: string } | null>(null);
+  const [shareNotice, setShareNotice] = useState<string | null>(null);
+
   // Participant Media States & Gesture Badges
   const [peerMediaStates, setPeerMediaStates] = useState<Map<string, { micOn: boolean; camOn: boolean }>>(new Map());
   const [peerGestures, setPeerGestures] = useState<Map<string, string>>(new Map());
 
   const isHost = user?.role === 'educator' || (session && session.hostId === user?.id);
 
-  // 1. Single getUserMedia call in the whole page
+  // 1. Single getUserMedia & screen share session in the whole page
   const {
     localStream,
     localVideoRef,
@@ -113,11 +121,17 @@ export const SessionPage: React.FC = () => {
     camOn,
     toggleMic,
     toggleCam,
+    screenStream,
+    isScreenSharing,
+    startScreenShare,
+    stopScreenShare,
+    restartCamera,
+    releaseAllMedia,
     error: mediaError,
     status: mediaStatus,
   } = useMediaSession(sessionId ?? '', user?.id);
 
-  // 2. Gesture Session using the same video element
+  // 2. Gesture Session using the same video element and reactive stream
   const {
     currentGesture,
     allHands,
@@ -130,18 +144,19 @@ export const SessionPage: React.FC = () => {
   } = useGestureSession({
     sessionId,
     videoRef: localVideoRef,
+    stream: localStream,
     arSceneRef: arRef,
     isApproved: true,
     enabled: true,
   });
 
   // Camera chip state: "on" | "off" | "denied" | "in use"
-  const cameraChipStatus: 'on' | 'off' | 'denied' | 'in use' = !camOn
+  const cameraChipStatus: 'on' | 'off' | 'denied' | 'in use' = mediaStatus === 'initializing'
+    ? 'in use'
+    : !camOn
     ? 'off'
     : mediaError?.toLowerCase().includes('denied') || mediaError?.toLowerCase().includes('unavailable')
     ? 'denied'
-    : mediaStatus === 'initializing'
-    ? 'in use'
     : localStream && localStream.getVideoTracks().some((t) => t.enabled)
     ? 'on'
     : 'off';
@@ -188,6 +203,8 @@ export const SessionPage: React.FC = () => {
   // 3. Realtime AR Scene Sync
   const {
     isConnected,
+    connectionError,
+    retryCount,
     controlledBy,
     participants,
     broadcastModelLoad,
@@ -203,6 +220,16 @@ export const SessionPage: React.FC = () => {
     onModelLoaded: (url) => setCurrentModelUrl(url),
   });
 
+  // Current room layout mode
+  // 1. Share Mode: someone is presenting screen
+  // 2. AR Mode: host loaded a 3D model
+  // 3. Meet Mode (default): responsive Google Meet video grid
+  const currentMode: 'meet' | 'ar' | 'share' = activePresenter
+    ? 'share'
+    : currentModelUrl
+    ? 'ar'
+    : 'meet';
+
   // Update connection status chip
   useEffect(() => {
     if (isConnected) {
@@ -214,7 +241,7 @@ export const SessionPage: React.FC = () => {
     }
   }, [isConnected, loadingSession]);
 
-  // 4. Socket Listeners for chat, whiteboard strokes, peer media states, and gesture badges
+  // 4. Socket Listeners for chat, whiteboard strokes, peer media states, screen share, and gesture badges
   useEffect(() => {
     if (!sessionId || !token) return;
 
@@ -255,11 +282,20 @@ export const SessionPage: React.FC = () => {
       }
     };
 
+    const handleScreenShare = (data: ServerScreenSharePayload) => {
+      if (data.on) {
+        setActivePresenter({ userId: data.userId, name: data.name });
+      } else {
+        setActivePresenter((curr) => (curr?.userId === data.userId ? null : curr));
+      }
+    };
+
     socketManager.on('chat_message', handleChat);
     socketManager.on('whiteboard_stroke', handleStroke);
     socketManager.on('whiteboard_clear', handleClear);
     socketManager.on('media_state', handleMediaState);
     socketManager.on('gesture_event', handleGestureEvent);
+    socketManager.on('screen_share', handleScreenShare);
 
     return () => {
       socketManager.off('chat_message', handleChat);
@@ -267,12 +303,31 @@ export const SessionPage: React.FC = () => {
       socketManager.off('whiteboard_clear', handleClear);
       socketManager.off('media_state', handleMediaState);
       socketManager.off('gesture_event', handleGestureEvent);
+      socketManager.off('screen_share', handleScreenShare);
     };
   }, [sessionId, token]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages]);
+
+  // Full media cleanup on beforeunload / pagehide
+  useEffect(() => {
+    const handleUnload = () => {
+      releaseAllMedia();
+      if (sessionId) {
+        socketManager.emit('leave_session', { sessionId });
+      }
+    };
+
+    window.addEventListener('beforeunload', handleUnload);
+    window.addEventListener('pagehide', handleUnload);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleUnload);
+      window.removeEventListener('pagehide', handleUnload);
+    };
+  }, [releaseAllMedia, sessionId]);
 
   // 5. Engagement Ping Sender: every 15s sends engagement_ping { sessionId, active }
   // Active is true if tab is visible AND there was recent activity within last 30s
@@ -415,10 +470,64 @@ export const SessionPage: React.FC = () => {
     }
   };
 
+  const handleToggleScreenShare = async () => {
+    if (!sessionId) return;
+    if (isScreenSharing) {
+      stopScreenShare();
+      socketManager.emit('screen_share', {
+        sessionId,
+        userId: user?.id ?? '',
+        name: user?.name ?? 'User',
+        on: false,
+      });
+      setActivePresenter(null);
+    } else {
+      if (activePresenter && activePresenter.userId !== user?.id && !isHost) {
+        setShareNotice(`${activePresenter.name} is currently presenting.`);
+        setTimeout(() => setShareNotice(null), 3000);
+        return;
+      }
+      const stream = await startScreenShare();
+      if (stream) {
+        socketManager.emit('screen_share', {
+          sessionId,
+          userId: user?.id ?? '',
+          name: user?.name ?? 'User',
+          on: true,
+        });
+        setActivePresenter({ userId: user?.id ?? '', name: user?.name ?? 'You' });
+      }
+    }
+  };
+
   const endSession = async () => {
     if (!sessionId || !isHost) return;
+    if (isScreenSharing) {
+      stopScreenShare();
+      socketManager.emit('screen_share', {
+        sessionId,
+        userId: user?.id ?? '',
+        name: user?.name ?? 'User',
+        on: false,
+      });
+    }
+    releaseAllMedia();
     await apiFetch(`/sessions/${sessionId}/end`, { method: 'POST' }).catch(() => {});
     navigate(`/session/${sessionId}/report`);
+  };
+
+  const leaveSession = () => {
+    if (isScreenSharing && sessionId) {
+      stopScreenShare();
+      socketManager.emit('screen_share', {
+        sessionId,
+        userId: user?.id ?? '',
+        name: user?.name ?? 'User',
+        on: false,
+      });
+    }
+    releaseAllMedia();
+    navigate('/dashboard');
   };
 
   const copyRoomCode = () => {
@@ -466,89 +575,151 @@ export const SessionPage: React.FC = () => {
 
   const panelOpen = sidePanel !== null && sidePanel !== 'gemini';
 
+  // Presenter stream resolution for Share mode
+  const presenterStream = activePresenter?.userId === user?.id
+    ? screenStream
+    : activePresenter?.userId
+    ? remoteStreams.get(activePresenter.userId)?.stream
+    : null;
+
   return (
-    <div className="relative w-screen h-screen overflow-hidden bg-black select-none flex flex-col md:flex-row">
-      {/* Main Collaborative AR Viewport */}
+    <div className="relative w-screen h-screen overflow-hidden bg-slate-950 select-none flex flex-col md:flex-row">
+      {/* Share / Conflict Notice Toast */}
+      {shareNotice && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-amber-500/90 text-slate-950 text-xs font-semibold rounded-xl shadow-2xl pointer-events-none animate-fade-in">
+          {shareNotice}
+        </div>
+      )}
+
+      {/* Main Viewport */}
       <div className="relative flex-1 h-full overflow-hidden flex flex-col">
-        {/* Z-ORDER LAYER 0: Local camera background feed */}
-        {camOn && localStream && (
-          <video
-            autoPlay
-            playsInline
-            muted
-            className="absolute inset-0 w-full h-full object-cover z-0 -scale-x-100 opacity-60 pointer-events-none"
-            ref={(el) => {
-              if (el && el.srcObject !== localStream) {
-                el.srcObject = localStream;
-              }
-            }}
-          />
+        {/* ================= MODE 1: MEET MODE (Full Screen Video Grid) ================= */}
+        {currentMode === 'meet' && (
+          <div className="absolute inset-0 z-10 flex flex-col justify-center items-center p-3 md:p-6 bg-slate-950">
+            <VideoGrid
+              localStream={localStream}
+              localVideoRef={localVideoRef}
+              userName={user?.name ?? 'You'}
+              micOn={micOn}
+              camOn={camOn}
+              remoteStreams={remoteStreams}
+              layout="grid"
+              className="w-full h-full"
+            />
+          </div>
         )}
 
-        {/* Local Video Tile PIP preview */}
-        <div className="absolute top-20 right-4 z-20 w-44 sm:w-52 rounded-2xl overflow-hidden border border-purple-500/30 shadow-2xl bg-slate-900/90 pointer-events-auto">
-          <div className="relative aspect-video w-full flex items-center justify-center bg-black">
-            <video
-              ref={localVideoRef}
-              autoPlay
-              playsInline
-              muted
-              className={`w-full h-full object-cover -scale-x-100 ${camOn && localStream ? 'block' : 'hidden'}`}
-            />
-            {(!camOn || !localStream) && (
-              <div className="flex flex-col items-center justify-center p-3 text-center text-purple-300">
-                <div className="w-8 h-8 rounded-full bg-purple-900/60 border border-purple-500/40 flex items-center justify-center mb-1 text-xs font-bold text-white">
-                  {user?.name?.charAt(0).toUpperCase() || 'U'}
+        {/* ================= MODE 2: AR MODE (Transparent 3D Scene over User Camera) ================= */}
+        {currentMode === 'ar' && (
+          <>
+            {/* Z-0: User's Own Camera Background */}
+            {camOn && localStream ? (
+              <video
+                autoPlay
+                playsInline
+                muted
+                className="absolute inset-0 w-full h-full object-cover z-0 -scale-x-100 pointer-events-none"
+                ref={(el) => {
+                  if (el && el.srcObject !== localStream) {
+                    el.srcObject = localStream;
+                  }
+                }}
+              />
+            ) : (
+              <div className="absolute inset-0 z-0 bg-gradient-to-b from-slate-900 via-purple-950 to-slate-950 flex items-center justify-center pointer-events-none">
+                <div className="text-center text-purple-300/50 text-sm">
+                  Camera off — displaying virtual background
                 </div>
-                <span className="text-[10px] text-purple-400">Camera off</span>
               </div>
             )}
-            <div className="absolute bottom-1 left-2 right-2 flex items-center justify-between text-[10px] text-white bg-black/60 backdrop-blur-md px-1.5 py-0.5 rounded-md">
-              <span className="truncate max-w-[90px] font-medium">{user?.name || 'You'} (You)</span>
-              <div className="flex items-center gap-1">
-                {micOn ? <Mic className="w-2.5 h-2.5 text-emerald-400" /> : <MicOff className="w-2.5 h-2.5 text-rose-400" />}
-                {camOn ? <VideoIcon className="w-2.5 h-2.5 text-purple-300" /> : <VideoOff className="w-2.5 h-2.5 text-rose-400" />}
+
+            {/* Z-10: Transparent AR Scene */}
+            <div className="absolute inset-0 z-10">
+              <ARSceneComponent
+                ref={arRef}
+                modelUrl={currentModelUrl || undefined}
+                enableCamera={false}
+                onTransformChange={onLocalTransformChange}
+                onInteractionEnd={onLocalInteractionEnd}
+                onPartSelect={(name) => onLocalPartSelect(name)}
+                onFilterChange={onLocalFilterChange}
+                className="w-full h-full bg-transparent"
+              />
+            </div>
+
+            {/* Z-15: Other Participants Strip (right side overlay) */}
+            {remoteStreams.size > 0 && (
+              <div className="absolute top-20 right-4 z-15 w-40 max-h-[60vh] pointer-events-auto">
+                <VideoGrid
+                  localStream={null}
+                  localVideoRef={localVideoRef}
+                  userName={user?.name ?? 'You'}
+                  micOn={micOn}
+                  camOn={camOn}
+                  remoteStreams={remoteStreams}
+                  layout="strip"
+                />
               </div>
+            )}
+          </>
+        )}
+
+        {/* ================= MODE 3: SHARE MODE (Active Screen Presenter) ================= */}
+        {currentMode === 'share' && (
+          <div className="absolute inset-0 z-10 flex flex-col md:flex-row bg-slate-950">
+            {/* Main Presenter Display */}
+            <div className="relative flex-1 h-full flex flex-col justify-center items-center p-3">
+              <div className="relative w-full h-full max-h-[82vh] bg-black rounded-2xl overflow-hidden border border-purple-500/30 flex items-center justify-center shadow-2xl">
+                {presenterStream ? (
+                  <video
+                    autoPlay
+                    playsInline
+                    className="w-full h-full object-contain"
+                    ref={(el) => {
+                      if (el && el.srcObject !== presenterStream) {
+                        el.srcObject = presenterStream;
+                      }
+                    }}
+                  />
+                ) : (
+                  <div className="flex flex-col items-center justify-center text-purple-300/70 text-sm gap-2">
+                    <Monitor className="w-10 h-10 text-purple-400 animate-pulse" />
+                    <span>Connecting to screen stream…</span>
+                  </div>
+                )}
+
+                {/* Presenting Badge & Stop Button */}
+                <div className="absolute top-4 left-4 z-20 flex items-center gap-2 bg-slate-900/90 backdrop-blur-md px-3 py-1.5 rounded-xl border border-purple-500/30 text-xs shadow-lg">
+                  <Monitor className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="text-purple-100 font-medium">
+                    {activePresenter?.userId === user?.id ? 'You are presenting' : `${activePresenter?.name || 'Someone'} is presenting`}
+                  </span>
+                  {(activePresenter?.userId === user?.id || isHost) && (
+                    <button
+                      onClick={handleToggleScreenShare}
+                      className="ml-2 px-2 py-0.5 bg-rose-600 hover:bg-rose-500 text-white rounded text-[11px] font-semibold transition"
+                    >
+                      Stop sharing
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Participants Strip on Right */}
+            <div className="w-full md:w-48 max-h-36 md:max-h-full p-2 overflow-y-auto flex-shrink-0 z-15">
+              <VideoGrid
+                localStream={localStream}
+                localVideoRef={localVideoRef}
+                userName={user?.name ?? 'You'}
+                micOn={micOn}
+                camOn={camOn}
+                remoteStreams={remoteStreams}
+                layout="strip"
+              />
             </div>
           </div>
-        </div>
-
-        {/* Z-ORDER LAYER 10: AR Scene (enableCamera={false}) */}
-        <div className="absolute inset-0 z-10">
-          <ARSceneComponent
-            ref={arRef}
-            modelUrl={currentModelUrl || undefined}
-            enableCamera={false}
-            onTransformChange={onLocalTransformChange}
-            onInteractionEnd={onLocalInteractionEnd}
-            onPartSelect={(name) => onLocalPartSelect(name)}
-            onFilterChange={onLocalFilterChange}
-            className="w-full h-full"
-          />
-
-          {!currentModelUrl && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center p-6 bg-slate-950/60 backdrop-blur-sm z-15 pointer-events-auto">
-              <div className="max-w-md text-center p-8 rounded-3xl bg-slate-900/80 border border-purple-500/30 shadow-2xl">
-                <Box className="w-12 h-12 text-purple-400 mx-auto mb-4 animate-bounce" />
-                <h3 className="text-lg font-bold text-white mb-2">No 3D Model Loaded</h3>
-                <p className="text-sm text-slate-300 mb-6">
-                  {isHost
-                    ? 'Start the lesson by selecting a 3D model for all participants to explore.'
-                    : 'Waiting for the host to pick a model...'}
-                </p>
-                {isHost && (
-                  <button
-                    onClick={() => setSidePanel('models')}
-                    className="inline-flex items-center gap-2 px-6 py-3 rounded-2xl bg-purple-600 hover:bg-purple-500 text-white font-semibold text-sm shadow-lg shadow-purple-600/30 transition-all hover:scale-105 active:scale-95"
-                  >
-                    <Box className="w-4 h-4" />
-                    <span>Choose a model</span>
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
+        )}
 
         {/* Z-ORDER LAYER 20: Whiteboard Canvas Overlay */}
         <div className={`absolute inset-0 z-20 ${whiteboardActive ? 'pointer-events-auto' : 'pointer-events-none'}`}>
@@ -579,8 +750,11 @@ export const SessionPage: React.FC = () => {
 
         {/* Z-ORDER LAYER 30: Top Info & Status Bar */}
         <header className="absolute top-4 left-4 right-4 z-30 flex items-center justify-between pointer-events-none">
-          {/* Left: Room Code & Connection Chip */}
-          <div className="flex items-center gap-2 pointer-events-auto bg-slate-900/85 backdrop-blur-md border border-purple-500/30 px-3 py-1.5 rounded-2xl shadow-lg">
+          {/* Left: Room Code & Connection Chip with Error Tooltip */}
+          <div
+            className="flex items-center gap-2 pointer-events-auto bg-slate-900/85 backdrop-blur-md border border-purple-500/30 px-3 py-1.5 rounded-2xl shadow-lg relative group"
+            title={connectionError ? `Connection Error: ${connectionError} (retry ${retryCount})` : `Socket: ${connStatus}`}
+          >
             <div className="flex items-center gap-1.5">
               <span
                 className={`w-2 h-2 rounded-full flex-shrink-0 ${
@@ -605,6 +779,13 @@ export const SessionPage: React.FC = () => {
             >
               {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Share2 className="w-3.5 h-3.5" />}
             </button>
+
+            {/* Error tooltip if disconnected */}
+            {connectionError && (
+              <div className="absolute top-full mt-2 left-0 hidden group-hover:block z-50 px-3 py-1.5 bg-rose-950/90 border border-rose-500/50 rounded-xl text-[10px] text-rose-200 shadow-xl whitespace-nowrap">
+                {connectionError}
+              </div>
+            )}
           </div>
 
           {/* Status Chips: Camera & Hand Tracking */}
@@ -641,7 +822,7 @@ export const SessionPage: React.FC = () => {
           </div>
 
           {/* Center: Slide Switcher for Educator */}
-          {isHost && allModels.length > 0 && (
+          {isHost && allModels.length > 0 && currentMode === 'ar' && (
             <div className="hidden sm:flex items-center gap-1 pointer-events-auto bg-slate-900/85 backdrop-blur-md border border-purple-500/30 p-1 rounded-2xl shadow-lg">
               <button
                 onClick={() => goToSlide(currentSlideIdx - 1)}
@@ -699,9 +880,18 @@ export const SessionPage: React.FC = () => {
 
         {/* Media & Hand Tracking Error Notices */}
         {(mediaError || gestureError) && (
-          <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-30 px-3 py-1 bg-amber-950/80 border border-amber-500/40 rounded-xl text-[11px] text-amber-200 shadow-lg pointer-events-auto flex flex-col items-center gap-0.5">
-            {mediaError && <div>{mediaError}</div>}
-            {gestureError && <div className="text-rose-300">{gestureError}</div>}
+          <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-30 px-4 py-2 bg-amber-950/90 border border-amber-500/50 rounded-2xl text-[11px] text-amber-200 shadow-2xl pointer-events-auto flex items-center gap-3">
+            <div className="flex flex-col">
+              {mediaError && <span>{mediaError}</span>}
+              {gestureError && <span className="text-rose-300">{gestureError}</span>}
+            </div>
+            <button
+              onClick={restartCamera}
+              className="px-2.5 py-1 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-semibold transition flex items-center gap-1 flex-shrink-0"
+            >
+              <RefreshCw className="w-3 h-3" />
+              <span>Restart camera</span>
+            </button>
           </div>
         )}
 
@@ -727,6 +917,30 @@ export const SessionPage: React.FC = () => {
           >
             {camOn ? <VideoIcon className="w-4 h-4" /> : <VideoOff className="w-4 h-4" />}
           </button>
+
+          {/* Restart Camera Button */}
+          <button
+            onClick={restartCamera}
+            className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-purple-300 hover:text-white transition border border-purple-500/20"
+            title="Restart Camera"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
+
+          {/* Share Screen Button (hidden if getDisplayMedia unavailable) */}
+          {Boolean(navigator.mediaDevices?.getDisplayMedia) && (
+            <button
+              onClick={handleToggleScreenShare}
+              className={`p-2 rounded-xl border transition ${
+                isScreenSharing
+                  ? 'bg-emerald-600 border-emerald-400 text-white'
+                  : 'bg-slate-800 border-purple-500/20 text-purple-300 hover:text-white'
+              }`}
+              title={isScreenSharing ? 'Stop Sharing Screen' : 'Share Screen'}
+            >
+              {isScreenSharing ? <MonitorOff className="w-4 h-4" /> : <Monitor className="w-4 h-4" />}
+            </button>
+          )}
 
           <div className="w-[1px] h-5 bg-purple-500/30" />
 
@@ -758,15 +972,28 @@ export const SessionPage: React.FC = () => {
 
           <div className="w-[1px] h-5 bg-purple-500/30" />
 
-          {/* Video Strip Toggle */}
+          {/* Chat Drawer */}
           <button
-            onClick={() => setSidePanel((p) => (p === 'video' ? null : 'video'))}
+            onClick={() => setSidePanel((p) => (p === 'chat' ? null : 'chat'))}
             className={`p-2 rounded-xl border transition ${
-              sidePanel === 'video'
+              sidePanel === 'chat'
                 ? 'bg-purple-600 border-purple-400 text-white'
                 : 'bg-slate-800 border-purple-500/20 text-purple-300 hover:text-white'
             }`}
-            title="Video Grid"
+            title="Chat Messages"
+          >
+            <MessageSquare className="w-4 h-4" />
+          </button>
+
+          {/* Participants Drawer */}
+          <button
+            onClick={() => setSidePanel((p) => (p === 'participants' ? null : 'participants'))}
+            className={`p-2 rounded-xl border transition ${
+              sidePanel === 'participants'
+                ? 'bg-purple-600 border-purple-400 text-white'
+                : 'bg-slate-800 border-purple-500/20 text-purple-300 hover:text-white'
+            }`}
+            title="Participants List"
           >
             <Users className="w-4 h-4" />
           </button>
@@ -784,29 +1011,19 @@ export const SessionPage: React.FC = () => {
             <Bot className="w-4 h-4" />
           </button>
 
-          {/* Chat Drawer */}
-          <button
-            onClick={() => setSidePanel((p) => (p === 'chat' ? null : 'chat'))}
-            className={`p-2 rounded-xl border transition ${
-              sidePanel === 'chat'
-                ? 'bg-purple-600 border-purple-400 text-white'
-                : 'bg-slate-800 border-purple-500/20 text-purple-300 hover:text-white'
-            }`}
-            title="Chat Messages"
-          >
-            <MessageSquare className="w-4 h-4" />
-          </button>
-
-          {/* Model Selector / Uploader (Host) */}
+          {/* Models Panel (Host Only) */}
           {isHost && (
             <>
               <button
-                onClick={() => uploadInputRef.current?.click()}
-                disabled={uploading}
-                className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-purple-300 hover:text-white transition border border-purple-500/20"
-                title="Upload .glb model"
+                onClick={() => setSidePanel((p) => (p === 'models' ? null : 'models'))}
+                className={`p-2 rounded-xl border transition ${
+                  sidePanel === 'models' || Boolean(currentModelUrl)
+                    ? 'bg-purple-600 border-purple-400 text-white'
+                    : 'bg-slate-800 border-purple-500/20 text-purple-300 hover:text-white'
+                }`}
+                title="3D Models & AR Mode"
               >
-                {uploading ? <span className="text-xs">…</span> : <Upload className="w-4 h-4" />}
+                <Box className="w-4 h-4" />
               </button>
               <input
                 ref={uploadInputRef}
@@ -820,11 +1037,11 @@ export const SessionPage: React.FC = () => {
 
           <div className="w-[1px] h-5 bg-purple-500/30" />
 
-          {/* Share code */}
+          {/* Share Room Code */}
           <button
             onClick={copyRoomCode}
             className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-purple-300 hover:text-white transition border border-purple-500/20"
-            title="Share Room Code"
+            title="Copy Room Code"
           >
             {copiedCode ? <Check className="w-4 h-4 text-emerald-400" /> : <Share2 className="w-4 h-4" />}
           </button>
@@ -848,7 +1065,7 @@ export const SessionPage: React.FC = () => {
               </h3>
               <p className="text-xs text-purple-300/70">
                 {isHost
-                  ? 'Ending the session will conclude collaboration and open the post-session report.'
+                  ? 'Ending the session will conclude collaboration for everyone and open the post-session report.'
                   : 'Are you sure you want to return to your dashboard?'}
               </p>
               <div className="flex justify-end gap-2 mt-2">
@@ -862,7 +1079,7 @@ export const SessionPage: React.FC = () => {
                   onClick={() => {
                     setShowLeaveConfirm(false);
                     if (isHost) endSession();
-                    else navigate('/dashboard');
+                    else leaveSession();
                   }}
                   className="px-3 py-1.5 text-xs text-white bg-rose-600 hover:bg-rose-500 rounded-xl font-medium"
                 >
@@ -880,40 +1097,91 @@ export const SessionPage: React.FC = () => {
           panelOpen ? 'w-full md:w-80 h-72 md:h-full' : 'w-0 h-0'
         } bg-slate-900/95 backdrop-blur-md border-t md:border-t-0 md:border-l border-purple-500/20 flex flex-col overflow-hidden z-40`}
       >
-        {sidePanel === 'video' && (
+        {sidePanel === 'models' && isHost && (
           <div className="flex flex-col h-full w-full">
             <div className="flex items-center justify-between px-4 py-3 border-b border-purple-500/20">
               <div className="flex items-center gap-2">
-                <VideoIcon className="w-4 h-4 text-purple-400" />
-                <span className="text-sm font-semibold text-purple-100">Video & Audio</span>
-                <span className="text-xs bg-purple-500/20 text-purple-300 px-2 py-0.5 rounded-full">
-                  {remoteStreams.size + 1}
-                </span>
+                <Box className="w-4 h-4 text-purple-400" />
+                <span className="text-sm font-semibold text-purple-100">3D Models (AR Mode)</span>
               </div>
               <button onClick={() => setSidePanel(null)} className="text-slate-400 hover:text-white transition">
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto p-3">
-              <VideoGrid
-                localStream={localStream}
-                localVideoRef={localVideoRef}
-                userName={user?.name ?? 'You'}
-                micOn={micOn}
-                camOn={camOn}
-                remoteStreams={remoteStreams}
-                localOverlay={
-                  <HandOverlay
-                    videoRef={localVideoRef}
-                    allHands={allHands}
-                    gesture={currentGesture}
-                    fps={gestureFps}
-                    latencyMs={gestureLatencyMs}
-                    isEnabled={gesturesEnabled}
-                    className="w-full h-full"
-                  />
-                }
-              />
+            <div className="flex-1 overflow-y-auto p-3 space-y-3">
+              {/* Option to clear model and return to Meet Mode */}
+              <button
+                onClick={() => {
+                  loadModel('');
+                  setSidePanel(null);
+                }}
+                className={`w-full text-left p-3 rounded-2xl border transition ${
+                  !currentModelUrl
+                    ? 'bg-purple-950/50 border-purple-400 shadow-md'
+                    : 'bg-slate-800/80 border-slate-700 hover:border-purple-500/40'
+                }`}
+              >
+                <div className="text-xs font-bold text-white mb-0.5">No model (Meet Mode)</div>
+                <div className="text-[10px] text-purple-300/70">
+                  Switch the entire room back to full-screen video grid.
+                </div>
+              </button>
+
+              <div className="text-[11px] font-semibold text-purple-300 uppercase tracking-wider pt-2">
+                Sample Models
+              </div>
+              {SAMPLE_MODELS.map((m) => (
+                <button
+                  key={m.id}
+                  onClick={() => {
+                    loadModel(m.url);
+                    setSidePanel(null);
+                  }}
+                  className={`w-full text-left p-2.5 rounded-xl border transition ${
+                    currentModelUrl === m.url
+                      ? 'bg-purple-950/60 border-purple-400 shadow-lg'
+                      : 'bg-slate-800/60 border-purple-500/15 hover:border-purple-500/40'
+                  }`}
+                >
+                  <div className="text-xs font-semibold text-white">{m.name}</div>
+                  <div className="text-[10px] text-purple-300/60 line-clamp-1">{m.description}</div>
+                </button>
+              ))}
+
+              {assets.length > 0 && (
+                <>
+                  <div className="text-[11px] font-semibold text-purple-300 uppercase tracking-wider pt-2">
+                    Uploaded Models
+                  </div>
+                  {assets.map((a) => (
+                    <button
+                      key={a.id}
+                      onClick={() => {
+                        loadModel(a.url);
+                        setSidePanel(null);
+                      }}
+                      className={`w-full text-left p-2.5 rounded-xl border transition ${
+                        currentModelUrl === a.url
+                          ? 'bg-purple-950/60 border-purple-400 shadow-lg'
+                          : 'bg-slate-800/60 border-purple-500/15 hover:border-purple-500/40'
+                      }`}
+                    >
+                      <div className="text-xs font-semibold text-white">{a.name}</div>
+                    </button>
+                  ))}
+                </>
+              )}
+
+              <div className="pt-2">
+                <button
+                  onClick={() => uploadInputRef.current?.click()}
+                  disabled={uploading}
+                  className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-medium text-xs shadow-md transition disabled:opacity-50"
+                >
+                  <Upload className="w-4 h-4" />
+                  <span>{uploading ? 'Uploading .glb…' : 'Upload custom .glb'}</span>
+                </button>
+              </div>
             </div>
           </div>
         )}

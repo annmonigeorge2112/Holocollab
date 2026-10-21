@@ -24,7 +24,11 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @model_validator(mode="after")
-    def validate_production_settings(self):
+    def clean_settings(self):
+        if self.GEMINI_API_KEY:
+            self.GEMINI_API_KEY = self.GEMINI_API_KEY.strip().strip("'\"")
+        if self.GEMINI_MODEL:
+            self.GEMINI_MODEL = self.GEMINI_MODEL.strip().strip("'\"") or "gemini-2.5-flash"
         if self.ENVIRONMENT == "production":
             if not self.JWT_SECRET or self.JWT_SECRET in (
                 "replace_with_a_secure_jwt_secret",

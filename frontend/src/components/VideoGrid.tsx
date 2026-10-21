@@ -144,6 +144,7 @@ interface VideoGridProps {
   camOn: boolean;
   remoteStreams: Map<string, RemoteParticipantMedia>;
   localOverlay?: React.ReactNode;
+  layout?: 'grid' | 'strip';
   className?: string;
 }
 
@@ -155,41 +156,92 @@ export const VideoGrid: React.FC<VideoGridProps> = ({
   camOn,
   remoteStreams,
   localOverlay,
+  layout = 'grid',
   className = '',
 }) => {
   const remoteEntries = Array.from(remoteStreams.entries());
   const hasAudioOnlyNotice = remoteEntries.some(([, p]) => p.audioOnly);
+  const totalCount = 1 + remoteEntries.length;
 
-  return (
-    <div className={`flex flex-col gap-2 ${className}`}>
-      {/* Grid container: compact strip or responsive layout */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-2 gap-2 max-h-64 lg:max-h-none overflow-y-auto p-1">
+  if (layout === 'strip') {
+    return (
+      <div className={`flex flex-row lg:flex-col gap-2 overflow-x-auto lg:overflow-y-auto max-h-[140px] lg:max-h-full p-1 scrollbar-thin ${className}`}>
         {/* Local Participant */}
-        <VideoTile
-          stream={localStream}
-          videoRefProp={localVideoRef}
-          name={userName}
-          isLocal
-          micOn={micOn}
-          camOn={camOn}
-          overlay={localOverlay}
-        />
+        <div className="w-36 lg:w-44 flex-shrink-0">
+          <VideoTile
+            stream={localStream}
+            videoRefProp={localVideoRef}
+            name={userName}
+            isLocal
+            micOn={micOn}
+            camOn={camOn}
+            overlay={localOverlay}
+          />
+        </div>
 
         {/* Remote Participants */}
         {remoteEntries.map(([userId, p]) => (
-          <VideoTile
-            key={userId}
-            stream={p.stream}
-            name={p.name}
-            micOn={p.micOn}
-            camOn={p.camOn}
-            audioOnly={p.audioOnly}
-          />
+          <div key={userId} className="w-36 lg:w-44 flex-shrink-0">
+            <VideoTile
+              stream={p.stream}
+              name={p.name}
+              micOn={p.micOn}
+              camOn={p.camOn}
+              audioOnly={p.audioOnly}
+            />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  // Google Meet Full Screen Grid layout
+  // 1 person = 1 large tile, 2 = side-by-side, 3-4 = 2x2 grid, 5+ = 3x3 grid
+  const gridClasses =
+    totalCount === 1
+      ? 'grid-cols-1 max-w-4xl mx-auto h-full max-h-[75vh]'
+      : totalCount === 2
+      ? 'grid-cols-1 md:grid-cols-2 max-w-6xl mx-auto h-full max-h-[75vh]'
+      : totalCount <= 4
+      ? 'grid-cols-2 max-w-6xl mx-auto h-full max-h-[80vh]'
+      : 'grid-cols-2 md:grid-cols-3 max-w-7xl mx-auto h-full max-h-[85vh]';
+
+  return (
+    <div className={`w-full h-full flex flex-col justify-center items-center p-3 md:p-6 ${className}`}>
+      <div className={`grid gap-3 md:gap-4 w-full items-center justify-center ${gridClasses}`}>
+        {/* Local Participant */}
+        <div className="w-full h-full min-h-[180px] flex items-center justify-center">
+          <div className="w-full h-full">
+            <VideoTile
+              stream={localStream}
+              videoRefProp={localVideoRef}
+              name={userName}
+              isLocal
+              micOn={micOn}
+              camOn={camOn}
+              overlay={localOverlay}
+            />
+          </div>
+        </div>
+
+        {/* Remote Participants */}
+        {remoteEntries.map(([userId, p]) => (
+          <div key={userId} className="w-full h-full min-h-[180px] flex items-center justify-center">
+            <div className="w-full h-full">
+              <VideoTile
+                stream={p.stream}
+                name={p.name}
+                micOn={p.micOn}
+                camOn={p.camOn}
+                audioOnly={p.audioOnly}
+              />
+            </div>
+          </div>
         ))}
       </div>
 
       {hasAudioOnlyNotice && (
-        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-950/60 border border-amber-500/30 text-amber-300 text-[11px]">
+        <div className="mt-3 flex items-center gap-1.5 px-3 py-1 rounded-xl bg-amber-950/70 border border-amber-500/40 text-amber-300 text-xs shadow-lg">
           <VolumeX className="w-3.5 h-3.5 flex-shrink-0" />
           <span>Participant cap reached (max 6 video). Extra users connected via audio only.</span>
         </div>

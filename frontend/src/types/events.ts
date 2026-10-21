@@ -291,6 +291,19 @@ export interface ServerAirClearPayload {
   all: boolean;
 }
 
+export interface ScreenSharePayload {
+  sessionId: string;
+  userId: string;
+  name: string;
+  on: boolean;
+}
+
+export interface ServerScreenSharePayload {
+  userId: string;
+  name: string;
+  on: boolean;
+}
+
 // Strictly Typed Socket Event Maps
 export interface ClientToServerEvents {
   join_session: (data: JoinSessionPayload) => void;
@@ -305,6 +318,7 @@ export interface ClientToServerEvents {
   whiteboard_clear: (data: WhiteboardClearPayload) => void;
   chat_message: (data: ChatMessagePayload) => void;
   media_state: (data: MediaStatePayload) => void;
+  screen_share: (data: ScreenSharePayload) => void;
   rtc_offer: (data: RtcSignalPayload) => void;
   rtc_answer: (data: RtcSignalPayload) => void;
   rtc_ice: (data: RtcSignalPayload) => void;
@@ -318,6 +332,7 @@ export interface ClientToServerEvents {
 export interface ServerToClientEvents {
   participants_update: (data: ParticipantsUpdatePayload) => void;
   media_state: (data: ServerMediaStatePayload) => void;
+  screen_share: (data: ServerScreenSharePayload) => void;
   model_load: (data: ServerModelLoadPayload) => void;
   model_transform: (data: ServerModelTransformPayload) => void;
   part_select: (data: ServerPartSelectPayload) => void;

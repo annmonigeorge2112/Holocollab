@@ -9,7 +9,8 @@ from app.db.engine import get_db
 from app.db.schema import Session, Message, User
 from app.routers.auth import get_current_user
 from app.services.ai_service import ai_service
-from app.realtime.socket import sio, room_state
+from app.config import settings
+from app.realtime.socket import sio, room_state, room_activity_log
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
@@ -72,7 +73,12 @@ def standardize_ai_error(e: Exception) -> HTTPException:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"detail": "Gemini API key is not configured in backend environment.", "code": "missing_key"},
         )
-    if "404" in err_str or "not found" in err_str or "model" in err_str and ("invalid" in err_str or "unsupported" in err_str):
+    if "api_key_invalid" in err_str or "api key not valid" in err_str or "unauthenticated" in err_str:
+        return HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"detail": "Invalid Gemini API key. Please check your GEMINI_API_KEY setting.", "code": "invalid_key"},
+        )
+    if "404" in err_str or "not found" in err_str or ("model" in err_str and ("invalid" in err_str or "unsupported" in err_str)):
         return HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"detail": "Configured Gemini model is invalid or unsupported.", "code": "bad_model"},
@@ -81,6 +87,16 @@ def standardize_ai_error(e: Exception) -> HTTPException:
         return HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={"detail": "AI service is currently rate limited or busy. Please wait a few seconds and try again.", "code": "rate_limited"},
+        )
+    if "safety" in err_str or "blocked" in err_str:
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"detail": "AI request was blocked by safety filters.", "code": "blocked_by_safety"},
+        )
+    if "empty" in err_str and "reply" in err_str:
+        return HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"detail": "AI returned an empty response. Please try rephrasing.", "code": "empty_reply"},
         )
     return HTTPException(
         status_code=status.HTTP_502_BAD_GATEWAY,
@@ -138,6 +154,8 @@ async def chat_with_ai(
     else:
         try:
             raw_reply = await ai_service.chat(session_context=context, message=req.message)
+            if not raw_reply or not raw_reply.strip():
+                raw_reply = "I'm here to help you explore the 3D model. Ask me about specific parts or mechanisms!"
             ai_service.cache.set("chat", cache_key, raw_reply)
         except Exception as e:
             raise standardize_ai_error(e)
@@ -148,14 +166,16 @@ async def chat_with_ai(
 
     if highlight_match:
         part_name = highlight_match.group(1).strip()
-        # Emit highlight_object to the room
-        await sio.emit(
-            "highlight_object",
-            {"name": part_name, "by": "Gemini AI"},
-            room=req.sessionId,
-        )
+        # Only emit highlight if part_name matches one of available parts (case-insensitive)
+        matching_part = next((p for p in DEFAULT_MODEL_PARTS if p.lower() == part_name.lower()), None)
+        if matching_part:
+            await sio.emit(
+                "highlight_object",
+                {"name": matching_part, "by": "Gemini AI"},
+                room=req.sessionId,
+            )
 
-    return AIChatResponse(reply=cleaned_reply)
+    return AIChatResponse(reply=cleaned_reply or "Here is the information you requested.")
 
 @router.post("/summary", response_model=AISummaryResponse)
 async def generate_summary(
@@ -178,11 +198,35 @@ async def generate_summary(
     )
     messages = (await db.execute(msg_stmt)).scalars().all()
     transcript = "\n".join([f"{m.user_id}: {m.content}" for m in messages])
-    if not transcript:
-        transcript = f"Interactive session on {topic} with 3D model exploration."
+
+    # Fetch room activities
+    activities = room_activity_log.get(req.sessionId, [])
+    activity_lines = []
+    for act in activities[-30:]:
+        act_type = act.get("type")
+        details = act.get("details", {})
+        if act_type == "model_load":
+            activity_lines.append(f"Loaded 3D model: {details.get('assetUrl')}")
+        elif act_type == "part_select":
+            activity_lines.append(f"Inspected part: {details.get('part')}")
+        elif act_type == "highlight":
+            activity_lines.append(f"Highlighted component: {details.get('name')}")
+        elif act_type == "annotation":
+            activity_lines.append(f"Added annotation: {details.get('text')}")
+
+    activity_summary = "\n".join(activity_lines)
+
+    combined_notes = ""
+    if activity_summary:
+        combined_notes += f"Room 3D Activities:\n{activity_summary}\n\n"
+    if transcript:
+        combined_notes += f"Chat Discussion:\n{transcript}\n"
+
+    if not combined_notes.strip():
+        combined_notes = f"Interactive learning session on {topic} utilizing real-time 3D models, gesture tracking, and AR spatial overlays."
 
     try:
-        summary_text = await ai_service.class_summary(transcript=transcript, topic=topic)
+        summary_text = await ai_service.class_summary(transcript=combined_notes, topic=topic)
         return AISummaryResponse(summary=summary_text)
     except Exception as e:
         raise standardize_ai_error(e)
@@ -204,6 +248,6 @@ async def generate_quiz(
 async def ai_health(current_user: User = Depends(get_current_user)):
     try:
         await ai_service.generate_content("Reply with OK")
-        return {"ok": True}
+        return {"ok": True, "model": getattr(settings, "GEMINI_MODEL", "gemini-2.5-flash")}
     except Exception as e:
         raise standardize_ai_error(e)

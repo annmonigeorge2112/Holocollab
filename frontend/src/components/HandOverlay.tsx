@@ -19,11 +19,11 @@ interface HandOverlayProps {
 }
 
 const GESTURE_COLORS: Record<GestureType, { main: string; glow: string }> = {
-  none: { main: '#06b6d4', glow: 'rgba(6, 182, 212, 0.6)' },      // Cyan
-  open: { main: '#06b6d4', glow: 'rgba(6, 182, 212, 0.6)' },      // Cyan
-  point: { main: '#10b981', glow: 'rgba(16, 185, 129, 0.7)' },    // Green
-  pinch: { main: '#ec4899', glow: 'rgba(236, 72, 153, 0.7)' },    // Magenta
-  fist: { main: '#f97316', glow: 'rgba(249, 115, 22, 0.8)' },     // Orange
+  none: { main: '#22d3ee', glow: 'rgba(34, 211, 238, 0.8)' },   // Cyan
+  open: { main: '#60a5fa', glow: 'rgba(96, 165, 250, 0.85)' },  // Blue
+  point: { main: '#34d399', glow: 'rgba(52, 211, 153, 0.85)' }, // Green
+  pinch: { main: '#e879f9', glow: 'rgba(232, 121, 249, 0.9)' }, // Magenta
+  fist: { main: '#fb923c', glow: 'rgba(251, 146, 60, 0.9)' },   // Orange
 };
 
 export const HandOverlay: React.FC<HandOverlayProps> = ({
@@ -41,10 +41,41 @@ export const HandOverlay: React.FC<HandOverlayProps> = ({
   const [showOverlay, setShowOverlay] = useState(true);
   const [showTrail, setShowTrail] = useState(true);
   const [mirrorVideo, setMirrorVideo] = useState(true);
+  const [overlayStyle, setOverlayStyle] = useState<'neon' | 'simple'>('neon');
   const [showSettings, setShowSettings] = useState(false);
 
   // Fingertip trail (last ~20 positions in canvas coordinates)
   const trailRef = useRef<{ x: number; y: number; time: number }[]>([]);
+
+  // Automatically resize canvas when container or video resizes
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const handleResize = () => {
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        canvas.width = Math.round(rect.width * dpr);
+        canvas.height = Math.round(rect.height * dpr);
+      }
+    };
+
+    handleResize();
+    const observer = new ResizeObserver(handleResize);
+    observer.observe(canvas);
+    if (videoRef.current) {
+      observer.observe(videoRef.current);
+      videoRef.current.addEventListener('loadedmetadata', handleResize);
+    }
+
+    return () => {
+      observer.disconnect();
+      if (videoRef.current) {
+        videoRef.current.removeEventListener('loadedmetadata', handleResize);
+      }
+    };
+  }, [videoRef]);
 
   /**
    * Unified coordinate mapping function:
@@ -60,7 +91,6 @@ export const HandOverlay: React.FC<HandOverlayProps> = ({
       videoHeight: number,
       isMirrored: boolean
     ): { x: number; y: number } => {
-      // Calculate aspect ratios for object-fit: cover
       const videoRatio = videoWidth / videoHeight;
       const canvasRatio = canvasWidth / canvasHeight;
 
@@ -70,18 +100,15 @@ export const HandOverlay: React.FC<HandOverlayProps> = ({
       let offsetY = 0;
 
       if (canvasRatio > videoRatio) {
-        // Canvas is wider than video -> video scaled by width, top/bottom cropped
         renderWidth = canvasWidth;
         renderHeight = canvasWidth / videoRatio;
         offsetY = (canvasHeight - renderHeight) / 2;
       } else {
-        // Canvas is taller than video -> video scaled by height, left/right cropped
         renderHeight = canvasHeight;
         renderWidth = canvasHeight * videoRatio;
         offsetX = (canvasWidth - renderWidth) / 2;
       }
 
-      // Normalized coordinates
       const normX = isMirrored ? 1 - lm.x : lm.x;
       const normY = lm.y;
 
@@ -127,6 +154,11 @@ export const HandOverlay: React.FC<HandOverlayProps> = ({
     const videoWidth = video.videoWidth || 640;
     const videoHeight = video.videoHeight || 480;
     const colors = GESTURE_COLORS[gesture] || GESTURE_COLORS.none;
+    const isNeon = overlayStyle === 'neon';
+
+    if (isNeon) {
+      ctx.globalCompositeOperation = 'lighter';
+    }
 
     const mappedHands: { x: number; y: number }[][] = [];
 
@@ -139,10 +171,12 @@ export const HandOverlay: React.FC<HandOverlayProps> = ({
 
       // 1. Draw glowing connector lines
       ctx.beginPath();
-      ctx.lineWidth = 2.5;
+      ctx.lineWidth = isNeon ? 3 : 1.5;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
       ctx.strokeStyle = colors.glow;
       ctx.shadowColor = colors.main;
-      ctx.shadowBlur = 10;
+      ctx.shadowBlur = isNeon ? 22 : 0;
 
       HAND_CONNECTIONS.forEach(([start, end]) => {
         const p1 = pts[start];
@@ -154,34 +188,41 @@ export const HandOverlay: React.FC<HandOverlayProps> = ({
       });
       ctx.stroke();
 
-      // 2. Draw glowing dots on landmarks
+      // 2. Draw glowing dots on landmarks with subtle finger hue offsets
       pts.forEach((pt, idx) => {
         const isFingertip = FINGERTIP_INDICES.includes(idx);
-        const radius = isFingertip ? 4.5 : 2.5;
+        const radius = isNeon ? (isFingertip ? 7 : 3.5) : (isFingertip ? 4 : 2);
+
+        // Subtle finger hue offset: thumb=0, index=20, middle=40, ring=60, pinky=80
+        const fingerGroup = Math.floor(Math.max(0, idx - 1) / 4);
+        const hueShift = fingerGroup * 15;
 
         ctx.beginPath();
         ctx.arc(pt.x, pt.y, radius, 0, 2 * Math.PI);
-        ctx.fillStyle = isFingertip ? '#ffffff' : colors.main;
+        ctx.fillStyle = isFingertip ? '#ffffff' : `hsl(${((idx * 12 + hueShift) % 360)}, 90%, 65%)`;
         ctx.shadowColor = colors.main;
-        ctx.shadowBlur = isFingertip ? 12 : 6;
+        ctx.shadowBlur = isNeon ? (isFingertip ? 26 : 14) : 0;
         ctx.fill();
       });
 
       // 3. Gesture label next to the wrist (landmark 0)
       if (pts[0] && gesture !== 'none') {
         const wrist = pts[0];
+        ctx.save();
+        ctx.globalCompositeOperation = 'source-over';
         ctx.shadowBlur = 0;
         ctx.font = 'bold 11px sans-serif';
         const label = gesture.toUpperCase();
         const textWidth = ctx.measureText(label).width;
 
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
         ctx.beginPath();
         ctx.roundRect(wrist.x + 8, wrist.y - 14, textWidth + 12, 18, 4);
         ctx.fill();
 
         ctx.fillStyle = colors.main;
         ctx.fillText(label, wrist.x + 14, wrist.y);
+        ctx.restore();
       }
 
       // Record index fingertip for trailing path
@@ -201,11 +242,11 @@ export const HandOverlay: React.FC<HandOverlayProps> = ({
       ctx.beginPath();
       ctx.moveTo(p1.x, p1.y);
       ctx.lineTo(p2.x, p2.y);
-      ctx.lineWidth = 1.5;
-      ctx.strokeStyle = 'rgba(236, 72, 153, 0.45)';
-      ctx.shadowColor = '#ec4899';
-      ctx.shadowBlur = 12;
-      ctx.setLineDash([4, 4]);
+      ctx.lineWidth = isNeon ? 2 : 1;
+      ctx.strokeStyle = 'rgba(232, 121, 249, 0.6)';
+      ctx.shadowColor = '#e879f9';
+      ctx.shadowBlur = isNeon ? 20 : 0;
+      ctx.setLineDash([5, 5]);
       ctx.stroke();
       ctx.setLineDash([]);
     }
@@ -221,16 +262,16 @@ export const HandOverlay: React.FC<HandOverlayProps> = ({
         ctx.beginPath();
         ctx.moveTo(prev.x, prev.y);
         ctx.lineTo(curr.x, curr.y);
-        ctx.lineWidth = progress * 4;
+        ctx.lineWidth = progress * (isNeon ? 5 : 2.5);
         ctx.strokeStyle = colors.glow;
         ctx.shadowColor = colors.main;
-        ctx.shadowBlur = 8;
+        ctx.shadowBlur = isNeon ? 18 : 0;
         ctx.stroke();
       }
     }
 
     ctx.restore();
-  }, [allHands, gesture, isEnabled, showOverlay, showTrail, mirrorVideo, mapLandmarkToPixel, videoRef]);
+  }, [allHands, gesture, isEnabled, showOverlay, showTrail, mirrorVideo, overlayStyle, mapLandmarkToPixel, videoRef]);
 
   if (!isEnabled) return null;
 
@@ -296,6 +337,26 @@ export const HandOverlay: React.FC<HandOverlayProps> = ({
                 className="rounded accent-purple-600"
               />
             </label>
+
+            <div className="flex items-center justify-between pt-1 border-t border-purple-500/20">
+              <span>Style</span>
+              <div className="flex rounded-lg overflow-hidden border border-purple-500/30 text-[10px]">
+                <button
+                  type="button"
+                  onClick={() => setOverlayStyle('neon')}
+                  className={`px-2 py-0.5 ${overlayStyle === 'neon' ? 'bg-purple-600 text-white font-bold' : 'bg-slate-800 text-purple-300'}`}
+                >
+                  Neon
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOverlayStyle('simple')}
+                  className={`px-2 py-0.5 ${overlayStyle === 'simple' ? 'bg-purple-600 text-white font-bold' : 'bg-slate-800 text-purple-300'}`}
+                >
+                  Simple
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </div>

@@ -168,7 +168,8 @@ async def test_ai_health_normal_reply(client: AsyncClient, db_session: AsyncSess
     with patch.object(ai_service, "generate_content", new=AsyncMock(return_value="OK")):
         res = await client.get("/ai/health", headers={"Authorization": f"Bearer {token}"})
         assert res.status_code == 200
-        assert res.json() == {"ok": True}
+        assert res.json()["ok"] is True
+        assert "model" in res.json()
 
 @pytest.mark.asyncio
 async def test_ai_health_missing_key(client: AsyncClient, db_session: AsyncSession):
@@ -209,4 +210,47 @@ async def test_ai_health_rate_limited(client: AsyncClient, db_session: AsyncSess
         assert res.status_code == 429
         data = res.json()
         assert data["detail"]["code"] == "rate_limited"
+
+@pytest.mark.asyncio
+async def test_ai_error_safety_block(client: AsyncClient, db_session: AsyncSession):
+    user = User(name="User", email="safety@test.com", password_hash="hash", role="student")
+    db_session.add(user)
+    await db_session.commit()
+    token = create_access_token(user.id, user.role)
+
+    with patch.object(ai_service, "generate_content", side_effect=Exception("Blocked by safety filters")):
+        res = await client.get("/ai/health", headers={"Authorization": f"Bearer {token}"})
+        assert res.status_code == 400
+        assert res.json()["detail"]["code"] == "blocked_by_safety"
+
+@pytest.mark.asyncio
+async def test_ai_summary_generation_with_activity(client: AsyncClient, db_session: AsyncSession):
+    user = User(name="Host", email="summary_host@test.com", password_hash="hash", role="educator")
+    db_session.add(user)
+    await db_session.commit()
+    session_obj = Session(name="Bio Room", topic="Anatomy", room_code="BIO999", host_id=user.id)
+    db_session.add(session_obj)
+    await db_session.commit()
+    token = create_access_token(user.id, user.role)
+
+    with patch.object(ai_service, "class_summary", new=AsyncMock(return_value="Summary of Anatomy session.")):
+        res = await client.post("/ai/summary", headers={"Authorization": f"Bearer {token}"}, json={"sessionId": session_obj.id})
+        assert res.status_code == 200
+        assert "Anatomy" in res.json()["summary"]
+
+@pytest.mark.asyncio
+async def test_ai_summary_generation_empty_data(client: AsyncClient, db_session: AsyncSession):
+    user = User(name="Host2", email="summary_empty@test.com", password_hash="hash", role="educator")
+    db_session.add(user)
+    await db_session.commit()
+    session_obj = Session(name="Empty Room", topic="Astronomy", room_code="AST111", host_id=user.id)
+    db_session.add(session_obj)
+    await db_session.commit()
+    token = create_access_token(user.id, user.role)
+
+    with patch.object(ai_service, "class_summary", new=AsyncMock(return_value="Not much was recorded in this session")):
+        res = await client.post("/ai/summary", headers={"Authorization": f"Bearer {token}"}, json={"sessionId": session_obj.id})
+        assert res.status_code == 200
+        assert "Not much was recorded" in res.json()["summary"]
+
 

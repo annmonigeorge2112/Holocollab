@@ -17,7 +17,7 @@ export interface UseGestureSessionOptions {
   enabled?: boolean;
 }
 
-export type HandTrackingStatus = 'loading' | 'ready' | 'failed' | 'off';
+export type HandTrackingStatus = 'off' | 'loading' | 'ready' | 'running' | 'failed';
 
 export interface UseGestureSessionReturn {
   currentGesture: GestureType;
@@ -33,11 +33,14 @@ export interface UseGestureSessionReturn {
   logCalibrationSample: (expected: GestureType) => void;
   status: HandTrackingStatus;
   error: string | null;
+  delegate: 'GPU' | 'CPU';
+  hands: number;
 }
 
 export const useGestureSession = ({
   sessionId,
   videoRef,
+  stream,
   arSceneRef,
   isApproved = true,
   enabled = true,
@@ -51,6 +54,7 @@ export const useGestureSession = ({
   const [fps, setFps] = useState(0);
   const [latencyMs, setLatencyMs] = useState(0);
   const [isCalibrating, setIsCalibrating] = useState(false);
+  const [delegate, setDelegate] = useState<'GPU' | 'CPU'>('GPU');
 
   // Benchmarking and rolling FPS tracking
   const frameTimesRef = useRef<number[]>([]);
@@ -58,7 +62,11 @@ export const useGestureSession = ({
   const animFrameIdRef = useRef<number | null>(null);
 
   // Pinch baseline tracking
-  const lastPinchDistRef = useRef<number | null>(null);
+  const pinchStartDistRef = useRef<number | null>(null);
+  const pinchStartScaleRef = useRef<number>(1);
+  const twoHandStartDistRef = useRef<number | null>(null);
+  const twoHandStartScaleRef = useRef<number>(1);
+  const smoothedScaleRef = useRef<number>(1);
   const lastEmittedGestureRef = useRef<GestureType>('none');
 
   // Calibration logger function
@@ -95,6 +103,7 @@ export const useGestureSession = ({
       .then((landmarker) => {
         if (landmarker) {
           setStatus('ready');
+          setDelegate(gestureService.getDelegate());
         } else {
           setStatus('failed');
           setError('Hand tracking failed to load: initialization failed');
@@ -105,7 +114,7 @@ export const useGestureSession = ({
         setError(`Hand tracking failed to load: ${err?.message || 'network/WASM error'}`);
         console.error('Hand tracking init error:', err);
       });
-  }, [isEnabled, isApproved]);
+  }, [isEnabled, isApproved, stream, videoRef]);
 
   // Detection loop capped at 30 fps (~33.3 ms interval)
   useEffect(() => {
@@ -120,12 +129,16 @@ export const useGestureSession = ({
     let running = true;
     const TARGET_INTERVAL_MS = 1000 / 30; // 30 fps cap
 
+    // If landmarker is not available yet, ensure re-init
+    gestureService.initialize().catch(() => {});
+
     const processFrame = () => {
       if (!running) return;
 
       const video = videoRef.current;
       const now = performance.now();
 
+      // Ensure video is ready: readyState >= 2 (HAVE_CURRENT_DATA) and videoWidth > 0
       if (
         video &&
         video.readyState >= 2 &&
@@ -147,72 +160,108 @@ export const useGestureSession = ({
         frameTimesRef.current = frameTimesRef.current.filter((t) => now - t <= 1000);
         setFps(frameTimesRef.current.length);
 
+        setStatus('running');
+        setDelegate(gestureService.getDelegate());
         setCurrentGesture(res.gesture);
         setControllingHand(res.controllingHand);
         setAllHands(res.allHands);
 
         // Handle AR mapping if AR scene ref is provided
-        if (arSceneRef?.current && res.controllingHand) {
-          const lm = res.controllingHand.landmarks;
+        if (arSceneRef?.current) {
           const currentTransform = arSceneRef.current.getTransform();
 
-          if (res.gesture === 'fist') {
-            // Fist: reset model
-            arSceneRef.current.reset();
-            lastPinchDistRef.current = null;
-          } else if (res.gesture === 'point') {
-            // Point: translate by fingertip movement (index tip: 8)
-            const indexTip = lm[8];
-            const { dx, dy } = gestureService.getSmoothedDeltas(
-              { x: indexTip.x, y: indexTip.y },
-              'point'
-            );
-            if (dx !== 0 || dy !== 0) {
-              const [px, py, pz] = currentTransform.position;
-              // Mirror delta horizontally for natural feel
-              arSceneRef.current.setTransform({
-                position: [px - dx * 2.5, py - dy * 2.5, pz],
-              });
+          // Check Two-Hand Zoom: if two hands are detected, scale by distance change between the two index fingertips (landmark 8)
+          if (res.allHands.length >= 2 && res.allHands[0].landmarks[8] && res.allHands[1].landmarks[8]) {
+            const tip1 = res.allHands[0].landmarks[8];
+            const tip2 = res.allHands[1].landmarks[8];
+            const currentTwoHandDist = Math.hypot(tip1.x - tip2.x, tip1.y - tip2.y);
+
+            if (twoHandStartDistRef.current === null) {
+              twoHandStartDistRef.current = currentTwoHandDist;
+              twoHandStartScaleRef.current = currentTransform.scale;
+              smoothedScaleRef.current = currentTransform.scale;
+            } else if (twoHandStartDistRef.current > 0.02) {
+              const targetScale = twoHandStartScaleRef.current * (currentTwoHandDist / twoHandStartDistRef.current);
+              const clamped = Math.min(Math.max(targetScale, 0.2), 4.0);
+              smoothedScaleRef.current += (clamped - smoothedScaleRef.current) * 0.25;
+              arSceneRef.current.setTransform({ scale: smoothedScaleRef.current });
             }
-            lastPinchDistRef.current = null;
-          } else if (res.gesture === 'open') {
-            // Open: rotate by palm movement (wrist: 0 / MCP 9 center)
-            const palmCenter = { x: (lm[0].x + lm[9].x) / 2, y: (lm[0].y + lm[9].y) / 2 };
-            const { dx, dy } = gestureService.getSmoothedDeltas(palmCenter, 'open');
-            if (dx !== 0 || dy !== 0) {
-              const [rx, ry, rz] = currentTransform.rotation;
-              arSceneRef.current.setTransform({
-                rotation: [rx + dy * 3.0, ry - dx * 3.0, rz],
-              });
-            }
-            lastPinchDistRef.current = null;
-          } else if (res.gesture === 'pinch') {
-            // Pinch: zoom in/out (scale)
-            if (lastPinchDistRef.current !== null) {
-              const deltaPinch = res.pinchDistance - lastPinchDistRef.current;
-              if (Math.abs(deltaPinch) > 0.01) {
-                const nextScale = Math.min(Math.max(currentTransform.scale * (1 + deltaPinch * 1.5), 0.2), 5.0);
-                arSceneRef.current.setTransform({ scale: nextScale });
-              }
-            }
-            lastPinchDistRef.current = res.pinchDistance;
           } else {
-            lastPinchDistRef.current = null;
+            twoHandStartDistRef.current = null;
+
+            if (res.controllingHand) {
+              const lm = res.controllingHand.landmarks;
+
+              if (res.gesture === 'fist') {
+                // Fist: reset model
+                arSceneRef.current.reset();
+                pinchStartDistRef.current = null;
+                smoothedScaleRef.current = 1;
+              } else if (res.gesture === 'point') {
+                // Point: translate by fingertip movement (index tip: 8)
+                const indexTip = lm[8];
+                const { dx, dy } = gestureService.getSmoothedDeltas(
+                  { x: indexTip.x, y: indexTip.y },
+                  'point'
+                );
+                if (dx !== 0 || dy !== 0) {
+                  const [px, py, pz] = currentTransform.position;
+                  // Mirror delta horizontally for natural feel
+                  arSceneRef.current.setTransform({
+                    position: [px - dx * 2.5, py - dy * 2.5, pz],
+                  });
+                }
+                pinchStartDistRef.current = null;
+              } else if (res.gesture === 'open') {
+                // Open: rotate by palm movement (wrist: 0 / MCP 9 center)
+                const palmCenter = { x: (lm[0].x + lm[9].x) / 2, y: (lm[0].y + lm[9].y) / 2 };
+                const { dx, dy } = gestureService.getSmoothedDeltas(palmCenter, 'open');
+                if (dx !== 0 || dy !== 0) {
+                  const [rx, ry, rz] = currentTransform.rotation;
+                  arSceneRef.current.setTransform({
+                    rotation: [rx + dy * 3.0, ry - dx * 3.0, rz],
+                  });
+                }
+                pinchStartDistRef.current = null;
+              } else if (res.gesture === 'pinch') {
+                // Pinch: relative zoom start (scale = startScale * (currentDistance / startDistance))
+                // Clamped to [0.2, 4.0], smoothed
+                if (pinchStartDistRef.current === null) {
+                  pinchStartDistRef.current = Math.max(res.pinchDistance, 0.05);
+                  pinchStartScaleRef.current = currentTransform.scale;
+                  smoothedScaleRef.current = currentTransform.scale;
+                } else {
+                  const targetScale = pinchStartScaleRef.current * (res.pinchDistance / pinchStartDistRef.current);
+                  const clamped = Math.min(Math.max(targetScale, 0.2), 4.0);
+                  smoothedScaleRef.current += (clamped - smoothedScaleRef.current) * 0.25;
+                  arSceneRef.current.setTransform({ scale: smoothedScaleRef.current });
+                }
+              } else {
+                pinchStartDistRef.current = null;
+              }
+            } else {
+              pinchStartDistRef.current = null;
+            }
           }
         }
 
-        // Emit gesture_event if gesture changed
+        // Emit gesture_event if gesture changed and socket connected
         if (
           sessionId &&
+          socketManager.isConnected() &&
           res.gesture !== 'none' &&
           res.gesture !== lastEmittedGestureRef.current
         ) {
           lastEmittedGestureRef.current = res.gesture;
-          socketManager.emit('gesture_event', {
-            sessionId,
-            type: res.gesture,
-            data: { confidence: res.confidence },
-          });
+          try {
+            socketManager.emit('gesture_event', {
+              sessionId,
+              type: res.gesture,
+              data: { confidence: res.confidence },
+            });
+          } catch {
+            // Silently skip if socket is unavailable
+          }
         }
       }
 
@@ -227,7 +276,7 @@ export const useGestureSession = ({
         cancelAnimationFrame(animFrameIdRef.current);
       }
     };
-  }, [isEnabled, isApproved, videoRef, arSceneRef, sessionId]);
+  }, [isEnabled, isApproved, videoRef, stream, arSceneRef, sessionId]);
 
   return {
     currentGesture,
@@ -243,5 +292,7 @@ export const useGestureSession = ({
     logCalibrationSample,
     status,
     error,
+    delegate,
+    hands: allHands.length,
   };
 };

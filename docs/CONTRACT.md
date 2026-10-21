@@ -78,10 +78,12 @@ Mount path: `/socket.io`
 - `air_stroke_end`: `{ "sessionId": string, "id": string }`
 - `air_undo`: `{ "sessionId": string, "by": string }`
 - `air_clear`: `{ "sessionId": string, "by": string, "all": boolean }`
+- `screen_share`: `{ "sessionId": string, "userId": string, "name": string, "on": boolean }`
 
 ### Server -> Client (Broadcast / Targeted)
 - `participants_update`: `{ "participants": Array<{ "id": string, "name": string, "role": string, "joinedAt": string }> }`
 - `media_state`: `{ "userId": string, "micOn": boolean, "camOn": boolean }`
+- `screen_share`: `{ "userId": string, "name": string, "on": boolean }`
 - `model_load`: `{ "assetUrl": string, "by": string }`
 - `model_transform`: `{ "position": [number, number, number], "rotation": [number, number, number], "scale": number, "by": string }`
 - `part_select`: `{ "path": string | null, "by": string }`
@@ -107,12 +109,13 @@ Mount path: `/socket.io`
 On `join_session`, late joiners receive the current room state:
 1. `participants_update`: current participant list.
 2. `media_state`: latest media state for each active participant.
-3. `model_load`: `{ "assetUrl": currentModelUrl, "by": "system" }` (if a model has been loaded).
-4. `model_transform`: `{ "position": [x, y, z], "rotation": [rx, ry, rz], "scale": s, "by": lastBy }` (if transformed).
-5. `part_select`: `{ "path": selectedPartPath, "by": "system" }` (if a part is isolated).
-6. `model_filter`: `{ "filter": currentFilter, "by": "system" }` (if set).
-7. Prior `whiteboard_stroke` and `annotation_add` history.
-8. Prior stored `air_strokes` history (replayed as `air_stroke_start`, `air_stroke_points`, `air_stroke_end`). Max 300 strokes per room, max 3000 points per stroke.
+3. `screen_share`: `{ "userId": string, "name": string, "on": true }` (if an active presenter exists).
+4. `model_load`: `{ "assetUrl": currentModelUrl, "by": "system" }` (if a model has been loaded).
+5. `model_transform`: `{ "position": [x, y, z], "rotation": [rx, ry, rz], "scale": s, "by": lastBy }` (if transformed).
+6. `part_select`: `{ "path": selectedPartPath, "by": "system" }` (if a part is isolated).
+7. `model_filter`: `{ "filter": currentFilter, "by": "system" }` (if set).
+8. Prior `whiteboard_stroke` and `annotation_add` history.
+9. Prior stored `air_strokes` history (replayed as `air_stroke_start`, `air_stroke_points`, `air_stroke_end`). Max 300 strokes per room, max 3000 points per stroke.
 
 ---
 

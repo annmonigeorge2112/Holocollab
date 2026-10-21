@@ -52,47 +52,94 @@ export class GestureService {
     return GestureService.instance;
   }
 
+  private activeDelegate: 'GPU' | 'CPU' = 'GPU';
+
+  public getDelegate(): 'GPU' | 'CPU' {
+    return this.activeDelegate;
+  }
+
   public async initialize(): Promise<HandLandmarker | null> {
     if (this.landmarker) return this.landmarker;
     if (this.initPromise) return this.initPromise;
 
     this.initPromise = (async () => {
-      try {
-        const vision = await FilesetResolver.forVisionTasks(
-          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
-        );
+      const baseUrl = (import.meta.env.BASE_URL || '/').replace(/\/$/, '');
+      const localWasmPath = `${baseUrl}/mediapipe/wasm`;
+      const cdnWasmPath = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm';
+      const localModelPath = `${baseUrl}/mediapipe/hand_landmarker.task`;
+      const cdnModelPath = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 
-        let landmarker: HandLandmarker | null = null;
+      // 1. Resolve FilesetResolver (local first, fallback to CDN)
+      let vision;
+      try {
+        vision = await FilesetResolver.forVisionTasks(localWasmPath);
+      } catch (localWasmErr) {
+        console.warn('Local WASM files failed to load, falling back to CDN:', localWasmErr);
+        vision = await FilesetResolver.forVisionTasks(cdnWasmPath);
+      }
+
+      // 2. Determine model path (verify local model exists via fetch HEAD/GET)
+      let modelPath = localModelPath;
+      try {
+        const checkRes = await fetch(localModelPath, { method: 'HEAD' });
+        if (!checkRes.ok) {
+          modelPath = cdnModelPath;
+        }
+      } catch {
+        modelPath = cdnModelPath;
+      }
+
+      // 3. Create HandLandmarker with GPU first, fallback to CPU
+      let landmarker: HandLandmarker | null = null;
+      try {
+        landmarker = await HandLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: modelPath,
+            delegate: 'GPU',
+          },
+          runningMode: 'VIDEO',
+          numHands: 2,
+        });
+        this.activeDelegate = 'GPU';
+      } catch (gpuError) {
+        console.warn('GPU delegate failed for HandLandmarker, falling back to CPU:', gpuError);
         try {
           landmarker = await HandLandmarker.createFromOptions(vision, {
             baseOptions: {
-              modelAssetPath:
-                'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
-              delegate: 'GPU',
-            },
-            runningMode: 'VIDEO',
-            numHands: 2,
-          });
-        } catch (gpuError) {
-          console.warn('GPU delegate failed for HandLandmarker, falling back to CPU:', gpuError);
-          landmarker = await HandLandmarker.createFromOptions(vision, {
-            baseOptions: {
-              modelAssetPath:
-                'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+              modelAssetPath: modelPath,
               delegate: 'CPU',
             },
             runningMode: 'VIDEO',
             numHands: 2,
           });
+          this.activeDelegate = 'CPU';
+        } catch (cpuError) {
+          console.error('CPU delegate also failed for HandLandmarker:', cpuError);
+          // If local model failed, try one more attempt with CDN model
+          if (modelPath !== cdnModelPath) {
+            console.warn('Retrying HandLandmarker creation with CDN model path...');
+            landmarker = await HandLandmarker.createFromOptions(vision, {
+              baseOptions: {
+                modelAssetPath: cdnModelPath,
+                delegate: 'CPU',
+              },
+              runningMode: 'VIDEO',
+              numHands: 2,
+            });
+            this.activeDelegate = 'CPU';
+          } else {
+            throw cpuError;
+          }
         }
-
-        this.landmarker = landmarker;
-        return landmarker;
-      } catch (err) {
-        console.error('Failed to initialize HandLandmarker:', err);
-        return null;
       }
-    })();
+
+      this.landmarker = landmarker;
+      return landmarker;
+    })().catch((err) => {
+      console.error('Failed to initialize HandLandmarker:', err);
+      this.initPromise = null;
+      return null;
+    });
 
     return this.initPromise;
   }
@@ -181,6 +228,17 @@ export class GestureService {
    * - Ring tip: 16, PIP: 14
    * - Pinky tip: 20, PIP: 18
    */
+  private lastRawGesture: GestureType = 'none';
+
+  /**
+   * Geometry classification:
+   * A finger is extended when tip distance to wrist > PIP joint distance to wrist.
+   * - Thumb tip: 4, IP: 3
+   * - Index tip: 8, PIP: 6
+   * - Middle tip: 12, PIP: 10
+   * - Ring tip: 16, PIP: 14
+   * - Pinky tip: 20, PIP: 18
+   */
   public classifyGesture(lm: LandmarkPoint[]): GestureType {
     if (lm.length < 21) return 'none';
 
@@ -192,30 +250,42 @@ export class GestureService {
     const ringExtended = distToWrist(lm[16]) > distToWrist(lm[14]);
     const pinkyExtended = distToWrist(lm[20]) > distToWrist(lm[18]);
 
-    // Hand size normalization
+    // Hand size normalization: wrist to middle finger MCP (landmark 9)
     const handSize = Math.hypot(lm[9].x - wrist.x, lm[9].y - wrist.y) || 1;
     const thumbIndexDist = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y) / handSize;
 
-    // 1. Pinch: thumb and index tips are very close (< 0.35)
-    if (thumbIndexDist < 0.35) {
+    // 1. Pinch with hysteresis:
+    // Enter pinch when thumb-index distance < 0.35
+    // Stay in pinch until distance > 0.55
+    const isPinching =
+      this.lastRawGesture === 'pinch'
+        ? thumbIndexDist < 0.55
+        : thumbIndexDist < 0.35;
+
+    if (isPinching) {
+      this.lastRawGesture = 'pinch';
       return 'pinch';
     }
 
-    // 2. Fist: all fingers folded (tips closer to wrist than PIP)
+    // 2. Fist: all 4 fingers folded (tips closer to wrist than PIP)
     if (!indexExtended && !middleExtended && !ringExtended && !pinkyExtended) {
+      this.lastRawGesture = 'fist';
       return 'fist';
     }
 
-    // 3. Point: ONLY index extended, middle, ring, pinky folded
+    // 3. Point: forgiving point gesture - ONLY index extended, other 3 fingers curled (ignore thumb)
     if (indexExtended && !middleExtended && !ringExtended && !pinkyExtended) {
+      this.lastRawGesture = 'point';
       return 'point';
     }
 
     // 4. Open: index, middle, ring, and pinky all extended
     if (indexExtended && middleExtended && ringExtended && pinkyExtended) {
+      this.lastRawGesture = 'open';
       return 'open';
     }
 
+    this.lastRawGesture = 'none';
     return 'none';
   }
 

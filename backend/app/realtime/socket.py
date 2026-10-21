@@ -34,6 +34,8 @@ TRANSFORM_MIN_INTERVAL = 1.0 / 30.0
 last_ping_time: Dict[str, float] = {}
 # session_id -> { user_id: { "chat": int, "gestures": int, "strokes": int, "air_ink": int } }
 room_activity_counts: Dict[str, Dict[str, Dict[str, int]]] = {}
+# session_id -> list of event dicts: [{ "type": str, "timestamp": str, "details": dict }]
+room_activity_log: Dict[str, list[Dict[str, Any]]] = {}
 # user_id -> list of float timestamps within the last second for air_stroke_points
 user_air_points_times: Dict[str, list[float]] = {}
 AIR_POINTS_MAX_PER_SEC = 40
@@ -119,6 +121,7 @@ async def join_session(sid, data):
             "host_id": host_id,
             "participants": {},
             "media_state": {},
+            "screen_share": None,
             "current_model_url": None,
             "last_model_transform": None,
             "selected_part_path": None,
@@ -138,6 +141,13 @@ async def join_session(sid, data):
     user_info["session_id"] = session_id
     await sio.enter_room(sid, session_id)
 
+    # Record join in activity log
+    room_activity_log.setdefault(session_id, []).append({
+        "type": "join",
+        "timestamp": now_iso,
+        "details": {"userId": user_info["user_id"], "name": user_info["name"], "role": user_info["role"]},
+    })
+
     # Emit current participants to the whole room
     participants_list = list(room_state[session_id]["participants"].values())
     await sio.emit("participants_update", {"participants": participants_list}, room=session_id)
@@ -146,6 +156,10 @@ async def join_session(sid, data):
     media_states = room_state[session_id].get("media_state", {})
     for u_id, m_state in media_states.items():
         await sio.emit("media_state", {"userId": u_id, "micOn": m_state.get("micOn", False), "camOn": m_state.get("camOn", False)}, to=sid)
+
+    active_screen = room_state[session_id].get("screen_share")
+    if active_screen and active_screen.get("on"):
+        await sio.emit("screen_share", active_screen, to=sid)
 
     current_model = room_state[session_id].get("current_model_url")
     if current_model:
@@ -195,12 +209,25 @@ async def _handle_leave(sid):
     if "media_state" in room_state[session_id] and user_info["user_id"] in room_state[session_id]["media_state"]:
         del room_state[session_id]["media_state"][user_info["user_id"]]
 
+    # If leaving user was screen sharing, turn it off and notify room
+    active_screen = room_state[session_id].get("screen_share")
+    if active_screen and active_screen.get("userId") == user_info["user_id"]:
+        room_state[session_id]["screen_share"] = None
+        await sio.emit("screen_share", {"userId": user_info["user_id"], "name": user_info["name"], "on": False}, room=session_id)
+
     # Record leave timestamp in DB
     try:
         async with db_engine.async_session_maker() as db:
             await record_participant_leave(session_id, user_info["user_id"], db)
     except Exception:
         pass
+
+    # Record leave event in activity log
+    room_activity_log.setdefault(session_id, []).append({
+        "type": "leave",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "details": {"userId": user_info["user_id"], "name": user_info["name"]},
+    })
 
     # Leave room and broadcast participants_update
     await sio.leave_room(sid, session_id)
@@ -239,6 +266,15 @@ async def model_load(sid, data):
     asset_url = data.get("assetUrl", "")
     room_state[session_id]["current_model_url"] = asset_url
     room_state[session_id]["selected_part_path"] = None
+
+    # Record model load in activity log
+    model_name = asset_url.split("/")[-1] if asset_url else "None"
+    room_activity_log.setdefault(session_id, []).append({
+        "type": "model_load",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "details": {"url": asset_url, "name": model_name, "by": user_info["name"]},
+    })
+
     await sio.emit("model_load", {"assetUrl": asset_url, "by": user_info["name"]}, room=session_id)
 
 @sio.event
@@ -281,6 +317,15 @@ async def part_select(sid, data):
         "by": data.get("by") or user_info["name"],
     }
     room_state[session_id]["selected_part_path"] = path
+
+    # Record part selection in activity log
+    if path:
+        room_activity_log.setdefault(session_id, []).append({
+            "type": "part_select",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "details": {"part": path, "by": payload["by"]},
+        })
+
     await sio.emit("part_select", payload, room=session_id, skip_sid=sid)
 
 @sio.event
@@ -338,6 +383,14 @@ async def annotation_add(sid, data):
         "by": user_info["name"],
     }
     room_state[session_id]["annotations"].append(payload)
+
+    # Record annotation in activity log
+    room_activity_log.setdefault(session_id, []).append({
+        "type": "annotation",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "details": {"text": payload["text"], "by": payload["by"]},
+    })
+
     await sio.emit("annotation_add", payload, room=session_id, skip_sid=sid)
 
 @sio.event
@@ -641,6 +694,15 @@ async def highlight_object(sid, data):
         "name": data.get("name", ""),
         "by": user_info["name"],
     }
+
+    # Record highlight in activity log
+    if payload["name"]:
+        room_activity_log.setdefault(session_id, []).append({
+            "type": "highlight",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "details": {"name": payload["name"], "by": payload["by"]},
+        })
+
     await sio.emit("highlight_object", payload, room=session_id, skip_sid=sid)
 
 # WebRTC Signaling: relay rtc_offer, rtc_answer, rtc_ice to target socket/user only
@@ -735,3 +797,62 @@ async def rtc_ice(sid, data):
         "payload": data.get("payload", {}),
     }
     await sio.emit("rtc_ice", payload, to=target_sid)
+
+@sio.event
+async def media_state(sid, data):
+    user_info = socket_users.get(sid)
+    if not user_info:
+        return
+    session_id = data.get("sessionId") or user_info.get("session_id")
+    if not session_id or session_id not in room_state:
+        return
+
+    user_id = data.get("userId") or user_info["user_id"]
+    mic_on = bool(data.get("micOn", False))
+    cam_on = bool(data.get("camOn", False))
+
+    if "media_state" not in room_state[session_id]:
+        room_state[session_id]["media_state"] = {}
+
+    room_state[session_id]["media_state"][user_id] = {
+        "micOn": mic_on,
+        "camOn": cam_on,
+    }
+
+    await sio.emit("media_state", {"userId": user_id, "micOn": mic_on, "camOn": cam_on}, room=session_id)
+
+@sio.event
+async def screen_share(sid, data):
+    user_info = socket_users.get(sid)
+    if not user_info:
+        return
+    session_id = data.get("sessionId") or user_info.get("session_id")
+    if not session_id or session_id not in room_state:
+        return
+
+    is_on = bool(data.get("on", False))
+    user_id = data.get("userId") or user_info["user_id"]
+    name = data.get("name") or user_info["name"]
+    is_host = (room_state[session_id].get("host_id") == user_info["user_id"]) or (user_info.get("role") == "educator")
+
+    active_screen = room_state[session_id].get("screen_share")
+
+    # If starting a share while someone else is already sharing:
+    # Only allow if current user is the same user or host stopping/overriding
+    if is_on:
+        if active_screen and active_screen.get("on") and active_screen.get("userId") != user_id:
+            await sio.emit("error", {
+                "message": f"Cannot share screen: {active_screen.get('name', 'Someone')} is already presenting."
+            }, to=sid)
+            return
+
+        screen_payload = {"userId": user_id, "name": name, "on": True}
+        room_state[session_id]["screen_share"] = screen_payload
+        await sio.emit("screen_share", screen_payload, room=session_id)
+    else:
+        # Turning off screen share: allowed if self or if host stopping anyone's share
+        if active_screen and (active_screen.get("userId") == user_id or is_host):
+            sharer_id = active_screen.get("userId")
+            sharer_name = active_screen.get("name")
+            room_state[session_id]["screen_share"] = None
+            await sio.emit("screen_share", {"userId": sharer_id, "name": sharer_name, "on": False}, room=session_id)
