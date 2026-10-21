@@ -40,6 +40,7 @@ engine_module.async_session_maker = async_session_factory
 
 @pytest_asyncio.fixture(scope="function")
 async def db_session():
+    engine_module.async_session_maker = async_session_factory
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     async with async_session_factory() as session:

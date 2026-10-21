@@ -37,10 +37,12 @@ async def global_exception_handler(request, exc: Exception):
         content={"detail": err_str}
     )
 
+cors_origins = settings.get_cors_origins()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=cors_origins,
+    allow_credentials=True if "*" not in cors_origins else False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -61,8 +63,8 @@ async def health():
 sio_asgi = socketio.ASGIApp(socketio_server=sio, other_asgi_app=app, socketio_path="socket.io")
 sio_app = CORSMiddleware(
     app=sio_asgi,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=cors_origins,
+    allow_credentials=True if "*" not in cors_origins else False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
