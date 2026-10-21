@@ -620,6 +620,7 @@ export const SessionPage: React.FC = () => {
                 muted
                 className="absolute inset-0 w-full h-full object-cover z-0 -scale-x-100 pointer-events-none"
                 ref={(el) => {
+                  (localVideoRef as any).current = el;
                   if (el && el.srcObject !== localStream) {
                     el.srcObject = localStream;
                   }
