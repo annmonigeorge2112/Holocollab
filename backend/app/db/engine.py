@@ -28,7 +28,17 @@ connect_args = {}
 if "sqlite" in DATABASE_URL:
     connect_args["check_same_thread"] = False
 
-engine = create_async_engine(DATABASE_URL, echo=False, connect_args=connect_args)
+engine_kwargs = {
+    "echo": False,
+    "connect_args": connect_args,
+}
+if "postgresql" in DATABASE_URL or "postgres" in DATABASE_URL:
+    engine_kwargs["pool_pre_ping"] = True
+    engine_kwargs["pool_recycle"] = 300
+    engine_kwargs["pool_size"] = 10
+    engine_kwargs["max_overflow"] = 20
+
+engine = create_async_engine(DATABASE_URL, **engine_kwargs)
 async_session_maker = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 async def init_db() -> None:
