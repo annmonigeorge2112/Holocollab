@@ -17,9 +17,12 @@ export class SocketManager {
   }
 
   public connect(token: string, serverUrl?: string): TypedSocket {
-    const url = serverUrl || import.meta.env.VITE_API_URL || 'http://localhost:8000';
+    const url = serverUrl || import.meta.env.VITE_SOCKET_URL || import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-    if (this.socket && this.socket.connected && this.currentToken === token && this.currentUrl === url) {
+    if (this.socket && this.currentToken === token && this.currentUrl === url) {
+      if (!this.socket.connected) {
+        this.socket.connect();
+      }
       return this.socket;
     }
 
@@ -39,9 +42,14 @@ export class SocketManager {
       },
       transports: ['websocket', 'polling'],
       reconnection: true,
-      reconnectionAttempts: 5,
+      reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
     }) as TypedSocket;
+
+    this.socket.on('connect_error', (err) => {
+      console.error('[SocketManager] Connection error:', err.message, err);
+    });
 
     return this.socket;
   }

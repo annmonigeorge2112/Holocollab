@@ -11,10 +11,13 @@ import { ARSceneHandle } from '../components/ARScene';
 export interface UseGestureSessionOptions {
   sessionId?: string;
   videoRef: React.RefObject<HTMLVideoElement>;
+  stream?: MediaStream | null;
   arSceneRef?: React.RefObject<ARSceneHandle | null>;
   isApproved?: boolean; // Control and safety: host approval
   enabled?: boolean;
 }
+
+export type HandTrackingStatus = 'loading' | 'ready' | 'failed' | 'off';
 
 export interface UseGestureSessionReturn {
   currentGesture: GestureType;
@@ -28,6 +31,8 @@ export interface UseGestureSessionReturn {
   isCalibrating: boolean;
   setIsCalibrating: (calibrating: boolean) => void;
   logCalibrationSample: (expected: GestureType) => void;
+  status: HandTrackingStatus;
+  error: string | null;
 }
 
 export const useGestureSession = ({
@@ -38,6 +43,8 @@ export const useGestureSession = ({
   enabled = true,
 }: UseGestureSessionOptions): UseGestureSessionReturn => {
   const [isEnabled, setIsEnabled] = useState(enabled);
+  const [status, setStatus] = useState<HandTrackingStatus>('loading');
+  const [error, setError] = useState<string | null>(null);
   const [currentGesture, setCurrentGesture] = useState<GestureType>('none');
   const [controllingHand, setControllingHand] = useState<HandLandmarksResult | null>(null);
   const [allHands, setAllHands] = useState<HandLandmarksResult[]>([]);
@@ -75,9 +82,29 @@ export const useGestureSession = ({
   );
 
   useEffect(() => {
-    if (isEnabled && isApproved) {
-      gestureService.initialize();
+    if (!isEnabled || !isApproved) {
+      setStatus('off');
+      return;
     }
+
+    setStatus('loading');
+    setError(null);
+
+    gestureService
+      .initialize()
+      .then((landmarker) => {
+        if (landmarker) {
+          setStatus('ready');
+        } else {
+          setStatus('failed');
+          setError('Hand tracking failed to load: initialization failed');
+        }
+      })
+      .catch((err: any) => {
+        setStatus('failed');
+        setError(`Hand tracking failed to load: ${err?.message || 'network/WASM error'}`);
+        console.error('Hand tracking init error:', err);
+      });
   }, [isEnabled, isApproved]);
 
   // Detection loop capped at 30 fps (~33.3 ms interval)
@@ -102,6 +129,7 @@ export const useGestureSession = ({
       if (
         video &&
         video.readyState >= 2 &&
+        video.videoWidth > 0 &&
         !video.paused &&
         !video.ended &&
         now - lastDetectionTimeRef.current >= TARGET_INTERVAL_MS
@@ -213,5 +241,7 @@ export const useGestureSession = ({
     isCalibrating,
     setIsCalibrating,
     logCalibrationSample,
+    status,
+    error,
   };
 };

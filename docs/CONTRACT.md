@@ -73,6 +73,11 @@ Mount path: `/socket.io`
 - `part_select`: `{ "sessionId": string, "path": string | null, "by": string }`
 - `model_filter`: `{ "sessionId": string, "filter": "realistic" | "blue" | "red", "by": string }`
 - `media_state`: `{ "sessionId": string, "userId": string, "micOn": boolean, "camOn": boolean }`
+- `air_stroke_start`: `{ "sessionId": string, "id": string, "color": string, "width": number, "by": string, "name": string }`
+- `air_stroke_points`: `{ "sessionId": string, "id": string, "points": [number, number, number][] }`
+- `air_stroke_end`: `{ "sessionId": string, "id": string }`
+- `air_undo`: `{ "sessionId": string, "by": string }`
+- `air_clear`: `{ "sessionId": string, "by": string, "all": boolean }`
 
 ### Server -> Client (Broadcast / Targeted)
 - `participants_update`: `{ "participants": Array<{ "id": string, "name": string, "role": string, "joinedAt": string }> }`
@@ -86,6 +91,11 @@ Mount path: `/socket.io`
 - `annotation_clear`: `{ "by": string }`
 - `whiteboard_stroke`: `{ "points": [number, number][], "color": string, "size": number, "tool": "pen" | "eraser", "by": string }`
 - `whiteboard_clear`: `{ "by": string }`
+- `air_stroke_start`: `{ "id": string, "color": string, "width": number, "by": string, "name": string }`
+- `air_stroke_points`: `{ "id": string, "points": [number, number, number][] }`
+- `air_stroke_end`: `{ "id": string }`
+- `air_undo`: `{ "by": string }`
+- `air_clear`: `{ "by": string, "all": boolean }`
 - `chat_message`: `{ "id": string, "from": string, "name": string, "message": string, "timestamp": string }`
 - `rtc_offer`: `{ "to": string, "from": string, "payload": Record<string, unknown> }`
 - `rtc_answer`: `{ "to": string, "from": string, "payload": Record<string, unknown> }`
@@ -102,6 +112,7 @@ On `join_session`, late joiners receive the current room state:
 5. `part_select`: `{ "path": selectedPartPath, "by": "system" }` (if a part is isolated).
 6. `model_filter`: `{ "filter": currentFilter, "by": "system" }` (if set).
 7. Prior `whiteboard_stroke` and `annotation_add` history.
+8. Prior stored `air_strokes` history (replayed as `air_stroke_start`, `air_stroke_points`, `air_stroke_end`). Max 300 strokes per room, max 3000 points per stroke.
 
 ---
 

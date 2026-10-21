@@ -22,6 +22,9 @@ export interface UseRealtimeOptions {
 
 export interface UseRealtimeReturn {
   isConnected: boolean;
+  connectionError: string | null;
+  retryCount: number;
+  reconnect: () => void;
   controlledBy: string | null;
   participants: ParticipantsUpdatePayload['participants'];
   broadcastTransform: (transform: TransformState, isEnd?: boolean) => void;
@@ -57,8 +60,19 @@ export function useRealtime({
   onRemoteFilter,
 }: UseRealtimeOptions): UseRealtimeReturn {
   const [isConnected, setIsConnected] = useState(false);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
   const [controlledBy, setControlledBy] = useState<string | null>(null);
   const [participants, setParticipants] = useState<ParticipantsUpdatePayload['participants']>([]);
+
+  const reconnect = useCallback(() => {
+    if (!token) return;
+    setConnectionError(null);
+    const socket = socketManager.connect(token);
+    if (!socket.connected) {
+      socket.connect();
+    }
+  }, [token]);
 
   // Guard against echo loops: true when applying remote transforms or selections
   const isApplyingRemoteRef = useRef(false);
@@ -82,11 +96,23 @@ export function useRealtime({
 
     const handleConnect = () => {
       setIsConnected(true);
+      setConnectionError(null);
+      setRetryCount(0);
       socketManager.emit('join_session', { sessionId, token });
     };
 
     const handleDisconnect = () => {
       setIsConnected(false);
+    };
+
+    const handleConnectError = (err: Error) => {
+      setIsConnected(false);
+      setConnectionError(err.message || 'Connection failed');
+      setRetryCount((prev) => prev + 1);
+    };
+
+    const handleReconnectAttempt = (attempt: number) => {
+      setRetryCount(attempt);
     };
 
     const handleParticipantsUpdate = (data: ParticipantsUpdatePayload) => {
@@ -101,6 +127,13 @@ export function useRealtime({
         arSceneRef.current.selectPart(null);
         isApplyingRemoteRef.current = false;
         onModelLoaded?.(data.assetUrl, data.by);
+      } else if (!data.assetUrl) {
+        if (arSceneRef.current) {
+          isApplyingRemoteRef.current = true;
+          arSceneRef.current.selectPart(null);
+          isApplyingRemoteRef.current = false;
+        }
+        onModelLoaded?.('', data.by);
       }
     };
 
@@ -195,6 +228,8 @@ export function useRealtime({
 
     socket.on('connect', handleConnect);
     socket.on('disconnect', handleDisconnect);
+    socket.on('connect_error', handleConnectError as any);
+    socket.io?.on('reconnect_attempt', handleReconnectAttempt);
     socketManager.on('participants_update', handleParticipantsUpdate);
     socketManager.on('model_load', handleModelLoad);
     socketManager.on('model_transform', handleModelTransform);
@@ -210,6 +245,8 @@ export function useRealtime({
       socketManager.emit('leave_session', { sessionId });
       socket.off('connect', handleConnect);
       socket.off('disconnect', handleDisconnect);
+      socket.off('connect_error', handleConnectError as any);
+      socket.io?.off('reconnect_attempt', handleReconnectAttempt);
       socketManager.off('participants_update', handleParticipantsUpdate);
       socketManager.off('model_load', handleModelLoad);
       socketManager.off('model_transform', handleModelTransform);
@@ -353,6 +390,9 @@ export function useRealtime({
 
   return {
     isConnected,
+    connectionError,
+    retryCount,
+    reconnect,
     controlledBy,
     participants,
     broadcastTransform,

@@ -34,6 +34,11 @@ TRANSFORM_MIN_INTERVAL = 1.0 / 30.0
 last_ping_time: Dict[str, float] = {}
 # session_id -> { user_id: { "chat": int, "gestures": int, "strokes": int, "air_ink": int } }
 room_activity_counts: Dict[str, Dict[str, Dict[str, int]]] = {}
+# user_id -> list of float timestamps within the last second for air_stroke_points
+user_air_points_times: Dict[str, list[float]] = {}
+AIR_POINTS_MAX_PER_SEC = 40
+MAX_AIR_STROKES_PER_ROOM = 300
+MAX_POINTS_PER_AIR_STROKE = 3000
 
 @sio.event
 async def connect(sid, environ, auth=None):
@@ -120,6 +125,7 @@ async def join_session(sid, data):
             "model_filter": "realistic",
             "whiteboard_strokes": [],
             "annotations": [],
+            "air_strokes": [],
         }
 
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -157,6 +163,23 @@ async def join_session(sid, data):
         await sio.emit("whiteboard_stroke", stroke, to=sid)
     for annot in room_state[session_id]["annotations"]:
         await sio.emit("annotation_add", annot, to=sid)
+    for air_stroke in room_state[session_id].get("air_strokes", []):
+        await sio.emit("air_stroke_start", {
+            "id": air_stroke["id"],
+            "color": air_stroke["color"],
+            "width": air_stroke["width"],
+            "by": air_stroke["by"],
+            "name": air_stroke["name"],
+        }, to=sid)
+        points = air_stroke.get("points", [])
+        for i in range(0, len(points), 20):
+            await sio.emit("air_stroke_points", {
+                "id": air_stroke["id"],
+                "points": points[i:i+20],
+            }, to=sid)
+        await sio.emit("air_stroke_end", {
+            "id": air_stroke["id"],
+        }, to=sid)
 
 async def _handle_leave(sid):
     user_info = socket_users.get(sid)
@@ -371,6 +394,157 @@ async def whiteboard_clear(sid, data=None):
 
     room_state[session_id]["whiteboard_strokes"] = []
     await sio.emit("whiteboard_clear", {"by": user_info["name"]}, room=session_id, skip_sid=sid)
+
+@sio.event
+async def air_stroke_start(sid, data):
+    user_info = socket_users.get(sid)
+    if not user_info:
+        return
+    session_id = data.get("sessionId") or user_info.get("session_id")
+    if not session_id or session_id not in room_state:
+        return
+
+    stroke_id = str(data.get("id", ""))
+    color = str(data.get("color", "#00ffff"))
+    width = float(data.get("width", 2.0))
+    by_user_id = str(data.get("by", user_info["user_id"]))
+    by_name = str(data.get("name", user_info["name"]))
+
+    stroke_obj = {
+        "id": stroke_id,
+        "color": color,
+        "width": width,
+        "by": by_user_id,
+        "name": by_name,
+        "points": [],
+    }
+
+    strokes = room_state[session_id].get("air_strokes", [])
+    strokes.append(stroke_obj)
+    # Cap strokes per room at 300 (drop oldest)
+    if len(strokes) > MAX_AIR_STROKES_PER_ROOM:
+        room_state[session_id]["air_strokes"] = strokes[-MAX_AIR_STROKES_PER_ROOM:]
+    else:
+        room_state[session_id]["air_strokes"] = strokes
+
+    relay_payload = {
+        "id": stroke_id,
+        "color": color,
+        "width": width,
+        "by": by_user_id,
+        "name": by_name,
+    }
+    await sio.emit("air_stroke_start", relay_payload, room=session_id, skip_sid=sid)
+
+@sio.event
+async def air_stroke_points(sid, data):
+    user_info = socket_users.get(sid)
+    if not user_info:
+        return
+    session_id = data.get("sessionId") or user_info.get("session_id")
+    if not session_id or session_id not in room_state:
+        return
+
+    user_id = user_info["user_id"]
+    now = time.time()
+    # Rate limit: max 40 air_stroke_points events per second per user (drop extra)
+    history = [t for t in user_air_points_times.get(user_id, []) if now - t < 1.0]
+    if len(history) >= AIR_POINTS_MAX_PER_SEC:
+        return
+    history.append(now)
+    user_air_points_times[user_id] = history
+
+    stroke_id = str(data.get("id", ""))
+    incoming_points = data.get("points", [])
+    if not isinstance(incoming_points, list):
+        return
+
+    # Batches of up to 20
+    trimmed_points = incoming_points[:20]
+
+    # Find stroke in room state and append points up to MAX_POINTS_PER_AIR_STROKE
+    for stroke in room_state[session_id].get("air_strokes", []):
+        if stroke["id"] == stroke_id:
+            curr_len = len(stroke["points"])
+            remaining_cap = MAX_POINTS_PER_AIR_STROKE - curr_len
+            if remaining_cap > 0:
+                stroke["points"].extend(trimmed_points[:remaining_cap])
+            break
+
+    relay_payload = {
+        "id": stroke_id,
+        "points": trimmed_points,
+    }
+    await sio.emit("air_stroke_points", relay_payload, room=session_id, skip_sid=sid)
+
+@sio.event
+async def air_stroke_end(sid, data):
+    user_info = socket_users.get(sid)
+    if not user_info:
+        return
+    session_id = data.get("sessionId") or user_info.get("session_id")
+    if not session_id or session_id not in room_state:
+        return
+
+    stroke_id = str(data.get("id", ""))
+    relay_payload = {
+        "id": stroke_id,
+    }
+    await sio.emit("air_stroke_end", relay_payload, room=session_id, skip_sid=sid)
+
+@sio.event
+async def air_undo(sid, data):
+    user_info = socket_users.get(sid)
+    if not user_info:
+        return
+    session_id = data.get("sessionId") or user_info.get("session_id")
+    if not session_id or session_id not in room_state:
+        return
+
+    by_user = str(data.get("by", user_info["user_id"]))
+    strokes = room_state[session_id].get("air_strokes", [])
+
+    # Remove that user's most recent stroke
+    for i in range(len(strokes) - 1, -1, -1):
+        if strokes[i].get("by") == by_user:
+            del strokes[i]
+            break
+
+    relay_payload = {
+        "by": by_user,
+    }
+    await sio.emit("air_undo", relay_payload, room=session_id, skip_sid=sid)
+
+@sio.event
+async def air_clear(sid, data):
+    user_info = socket_users.get(sid)
+    if not user_info:
+        return
+    session_id = data.get("sessionId") or user_info.get("session_id")
+    if not session_id or session_id not in room_state:
+        return
+
+    by_user = str(data.get("by", user_info["user_id"]))
+    all_clear = bool(data.get("all", False))
+    host_id = room_state[session_id].get("host_id")
+
+    if all_clear:
+        # all=true is host-only (others get an error event)
+        is_host = (user_info.get("role") == "educator") or (user_info["user_id"] == host_id)
+        if not is_host:
+            await sio.emit("error", {"message": "Only host can clear all air strokes"}, to=sid)
+            return
+        room_state[session_id]["air_strokes"] = []
+    else:
+        # clear only that user's strokes
+        strokes = room_state[session_id].get("air_strokes", [])
+        room_state[session_id]["air_strokes"] = [s for s in strokes if s.get("by") != by_user]
+
+    relay_payload = {
+        "by": by_user,
+        "all": all_clear,
+    }
+    await sio.emit("air_clear", relay_payload, room=session_id, skip_sid=sid)
 
 @sio.event
 async def chat_message(sid, data):

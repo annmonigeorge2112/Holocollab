@@ -114,6 +114,7 @@ export const SessionPage: React.FC = () => {
     toggleMic,
     toggleCam,
     error: mediaError,
+    status: mediaStatus,
   } = useMediaSession(sessionId ?? '', user?.id);
 
   // 2. Gesture Session using the same video element
@@ -124,6 +125,8 @@ export const SessionPage: React.FC = () => {
     latencyMs: gestureLatencyMs,
     isEnabled: gesturesEnabled,
     setIsEnabled: setGesturesEnabled,
+    status: handTrackingStatus,
+    error: gestureError,
   } = useGestureSession({
     sessionId,
     videoRef: localVideoRef,
@@ -131,6 +134,17 @@ export const SessionPage: React.FC = () => {
     isApproved: true,
     enabled: true,
   });
+
+  // Camera chip state: "on" | "off" | "denied" | "in use"
+  const cameraChipStatus: 'on' | 'off' | 'denied' | 'in use' = !camOn
+    ? 'off'
+    : mediaError?.toLowerCase().includes('denied') || mediaError?.toLowerCase().includes('unavailable')
+    ? 'denied'
+    : mediaStatus === 'initializing'
+    ? 'in use'
+    : localStream && localStream.getVideoTracks().some((t) => t.enabled)
+    ? 'on'
+    : 'off';
 
   // Fetch session details
   const fetchSessionData = useCallback(() => {
@@ -454,16 +468,6 @@ export const SessionPage: React.FC = () => {
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-black select-none flex flex-col md:flex-row">
-      {/* Hidden local video element from which HandTracker & VideoGrid read */}
-      <video
-        ref={localVideoRef}
-        autoPlay
-        playsInline
-        muted
-        className="hidden"
-        aria-hidden="true"
-      />
-
       {/* Main Collaborative AR Viewport */}
       <div className="relative flex-1 h-full overflow-hidden flex flex-col">
         {/* Z-ORDER LAYER 0: Local camera background feed */}
@@ -480,6 +484,34 @@ export const SessionPage: React.FC = () => {
             }}
           />
         )}
+
+        {/* Local Video Tile PIP preview */}
+        <div className="absolute top-20 right-4 z-20 w-44 sm:w-52 rounded-2xl overflow-hidden border border-purple-500/30 shadow-2xl bg-slate-900/90 pointer-events-auto">
+          <div className="relative aspect-video w-full flex items-center justify-center bg-black">
+            <video
+              ref={localVideoRef}
+              autoPlay
+              playsInline
+              muted
+              className={`w-full h-full object-cover -scale-x-100 ${camOn && localStream ? 'block' : 'hidden'}`}
+            />
+            {(!camOn || !localStream) && (
+              <div className="flex flex-col items-center justify-center p-3 text-center text-purple-300">
+                <div className="w-8 h-8 rounded-full bg-purple-900/60 border border-purple-500/40 flex items-center justify-center mb-1 text-xs font-bold text-white">
+                  {user?.name?.charAt(0).toUpperCase() || 'U'}
+                </div>
+                <span className="text-[10px] text-purple-400">Camera off</span>
+              </div>
+            )}
+            <div className="absolute bottom-1 left-2 right-2 flex items-center justify-between text-[10px] text-white bg-black/60 backdrop-blur-md px-1.5 py-0.5 rounded-md">
+              <span className="truncate max-w-[90px] font-medium">{user?.name || 'You'} (You)</span>
+              <div className="flex items-center gap-1">
+                {micOn ? <Mic className="w-2.5 h-2.5 text-emerald-400" /> : <MicOff className="w-2.5 h-2.5 text-rose-400" />}
+                {camOn ? <VideoIcon className="w-2.5 h-2.5 text-purple-300" /> : <VideoOff className="w-2.5 h-2.5 text-rose-400" />}
+              </div>
+            </div>
+          </div>
+        </div>
 
         {/* Z-ORDER LAYER 10: AR Scene (enableCamera={false}) */}
         <div className="absolute inset-0 z-10">
@@ -575,6 +607,39 @@ export const SessionPage: React.FC = () => {
             </button>
           </div>
 
+          {/* Status Chips: Camera & Hand Tracking */}
+          <div className="flex items-center gap-2 pointer-events-auto bg-slate-900/85 backdrop-blur-md border border-purple-500/30 px-3 py-1.5 rounded-2xl shadow-lg text-[11px] font-mono">
+            <div className="flex items-center gap-1.5">
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  cameraChipStatus === 'on'
+                    ? 'bg-emerald-400'
+                    : cameraChipStatus === 'in use'
+                    ? 'bg-amber-400 animate-pulse'
+                    : 'bg-rose-500'
+                }`}
+              />
+              <span className="text-purple-200">Camera: <strong className="capitalize">{cameraChipStatus}</strong></span>
+            </div>
+
+            <div className="w-[1px] h-3 bg-purple-500/30" />
+
+            <div className="flex items-center gap-1.5">
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  handTrackingStatus === 'ready'
+                    ? 'bg-emerald-400'
+                    : handTrackingStatus === 'loading'
+                    ? 'bg-amber-400 animate-pulse'
+                    : handTrackingStatus === 'failed'
+                    ? 'bg-rose-500 animate-pulse'
+                    : 'bg-slate-400'
+                }`}
+              />
+              <span className="text-purple-200">Hand tracking: <strong className="capitalize">{handTrackingStatus}</strong></span>
+            </div>
+          </div>
+
           {/* Center: Slide Switcher for Educator */}
           {isHost && allModels.length > 0 && (
             <div className="hidden sm:flex items-center gap-1 pointer-events-auto bg-slate-900/85 backdrop-blur-md border border-purple-500/30 p-1 rounded-2xl shadow-lg">
@@ -632,10 +697,11 @@ export const SessionPage: React.FC = () => {
           </div>
         )}
 
-        {/* Media Error Notice */}
-        {mediaError && (
-          <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-30 px-3 py-1 bg-amber-950/80 border border-amber-500/40 rounded-xl text-[11px] text-amber-200 shadow-lg pointer-events-auto">
-            {mediaError}
+        {/* Media & Hand Tracking Error Notices */}
+        {(mediaError || gestureError) && (
+          <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-30 px-3 py-1 bg-amber-950/80 border border-amber-500/40 rounded-xl text-[11px] text-amber-200 shadow-lg pointer-events-auto flex flex-col items-center gap-0.5">
+            {mediaError && <div>{mediaError}</div>}
+            {gestureError && <div className="text-rose-300">{gestureError}</div>}
           </div>
         )}
 

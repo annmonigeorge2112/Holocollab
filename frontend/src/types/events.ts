@@ -233,6 +233,64 @@ export interface RtcSignalPayload {
   payload: Record<string, unknown>;
 }
 
+// Air Ink Payloads (CONTRACT.md)
+export interface AirStrokeStartPayload {
+  sessionId: string;
+  id: string;
+  color: string;
+  width: number;
+  by: string;
+  name: string;
+}
+
+export interface AirStrokePointsPayload {
+  sessionId: string;
+  id: string;
+  points: [number, number, number][];
+}
+
+export interface AirStrokeEndPayload {
+  sessionId: string;
+  id: string;
+}
+
+export interface AirUndoPayload {
+  sessionId: string;
+  by: string;
+}
+
+export interface AirClearPayload {
+  sessionId: string;
+  by: string;
+  all: boolean;
+}
+
+export interface ServerAirStrokeStartPayload {
+  id: string;
+  color: string;
+  width: number;
+  by: string;
+  name: string;
+}
+
+export interface ServerAirStrokePointsPayload {
+  id: string;
+  points: [number, number, number][];
+}
+
+export interface ServerAirStrokeEndPayload {
+  id: string;
+}
+
+export interface ServerAirUndoPayload {
+  by: string;
+}
+
+export interface ServerAirClearPayload {
+  by: string;
+  all: boolean;
+}
+
 // Strictly Typed Socket Event Maps
 export interface ClientToServerEvents {
   join_session: (data: JoinSessionPayload) => void;
@@ -250,6 +308,11 @@ export interface ClientToServerEvents {
   rtc_offer: (data: RtcSignalPayload) => void;
   rtc_answer: (data: RtcSignalPayload) => void;
   rtc_ice: (data: RtcSignalPayload) => void;
+  air_stroke_start: (data: AirStrokeStartPayload) => void;
+  air_stroke_points: (data: AirStrokePointsPayload) => void;
+  air_stroke_end: (data: AirStrokeEndPayload) => void;
+  air_undo: (data: AirUndoPayload) => void;
+  air_clear: (data: AirClearPayload) => void;
 }
 
 export interface ServerToClientEvents {
@@ -268,5 +331,10 @@ export interface ServerToClientEvents {
   rtc_answer: (data: { to: string; from: string; payload: Record<string, unknown> }) => void;
   rtc_ice: (data: { to: string; from: string; payload: Record<string, unknown> }) => void;
   error: (data: ErrorPayload) => void;
+  air_stroke_start: (data: ServerAirStrokeStartPayload) => void;
+  air_stroke_points: (data: ServerAirStrokePointsPayload) => void;
+  air_stroke_end: (data: ServerAirStrokeEndPayload) => void;
+  air_undo: (data: ServerAirUndoPayload) => void;
+  air_clear: (data: ServerAirClearPayload) => void;
 }
 

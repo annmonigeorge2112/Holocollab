@@ -20,6 +20,11 @@ from app.realtime.socket import (
     model_load,
     part_select,
     model_filter,
+    air_stroke_start,
+    air_stroke_points,
+    air_stroke_end,
+    air_undo,
+    air_clear,
     room_state,
     socket_users,
 )
@@ -216,3 +221,165 @@ async def test_socket_two_clients_join_and_transform(client: AsyncClient, db_ses
     await disconnect(sid2)
     assert len(room_state[session_id]["participants"]) == 1
     await disconnect(sid1)
+
+@pytest.mark.asyncio
+async def test_air_ink_drawing_late_joiner_undo_and_clear(client: AsyncClient, db_session: AsyncSession, monkeypatch):
+    educator_token = await get_token_for(client, "host_air@example.com", "educator", "Host Air")
+    student_token1 = await get_token_for(client, "student1_air@example.com", "student", "Student One")
+    student_token2 = await get_token_for(client, "student2_air@example.com", "student", "Student Two")
+
+    session_res = await client.post(
+        "/sessions",
+        json={"name": "Air Ink Lab", "topic": "Biology"},
+        headers={"Authorization": f"Bearer {educator_token}"},
+    )
+    assert session_res.status_code == 201
+    session_id = session_res.json()["id"]
+
+    emitted_events = []
+    rooms_map = {}
+
+    async def mock_emit(event, data, room=None, to=None, skip_sid=None):
+        emitted_events.append({
+            "event": event,
+            "data": data,
+            "room": room,
+            "to": to,
+            "skip_sid": skip_sid,
+        })
+
+    async def mock_enter_room(sid, room, namespace=None):
+        rooms_map.setdefault(room, set()).add(sid)
+
+    async def mock_leave_room(sid, room, namespace=None):
+        if room in rooms_map and sid in rooms_map[room]:
+            rooms_map[room].remove(sid)
+
+    monkeypatch.setattr(sio, "emit", mock_emit)
+    monkeypatch.setattr(sio, "enter_room", mock_enter_room)
+    monkeypatch.setattr(sio, "leave_room", mock_leave_room)
+
+    # 1. Host and Student 1 connect and join session
+    sid_host = "sid_host_air"
+    sid_s1 = "sid_s1_air"
+    assert await connect(sid_host, {}, auth={"token": educator_token}) is True
+    assert await connect(sid_s1, {}, auth={"token": student_token1}) is True
+
+    await join_session(sid_host, {"sessionId": session_id})
+    await join_session(sid_s1, {"sessionId": session_id})
+
+    # 2. Student 1 starts drawing a stroke
+    emitted_events.clear()
+    stroke_id = "stroke-xyz-123"
+    s1_user_id = socket_users[sid_s1]["user_id"]
+
+    await air_stroke_start(sid_s1, {
+        "sessionId": session_id,
+        "id": stroke_id,
+        "color": "#00ffff",
+        "width": 3,
+        "by": s1_user_id,
+        "name": "Student One",
+    })
+
+    # Check relay to other room participants (skipping sender)
+    start_emits = [e for e in emitted_events if e["event"] == "air_stroke_start"]
+    assert len(start_emits) == 1
+    assert start_emits[0]["room"] == session_id
+    assert start_emits[0]["skip_sid"] == sid_s1
+    assert start_emits[0]["data"]["id"] == stroke_id
+    assert start_emits[0]["data"]["color"] == "#00ffff"
+
+    # Send points
+    emitted_events.clear()
+    await air_stroke_points(sid_s1, {
+        "sessionId": session_id,
+        "id": stroke_id,
+        "points": [[0.1, 0.2, 0.3], [0.11, 0.21, 0.31]],
+    })
+    points_emits = [e for e in emitted_events if e["event"] == "air_stroke_points"]
+    assert len(points_emits) == 1
+    assert points_emits[0]["skip_sid"] == sid_s1
+    assert len(points_emits[0]["data"]["points"]) == 2
+
+    # End stroke
+    emitted_events.clear()
+    await air_stroke_end(sid_s1, {
+        "sessionId": session_id,
+        "id": stroke_id,
+    })
+    end_emits = [e for e in emitted_events if e["event"] == "air_stroke_end"]
+    assert len(end_emits) == 1
+    assert end_emits[0]["skip_sid"] == sid_s1
+
+    # Verify stroke is stored in room_state
+    stored = room_state[session_id]["air_strokes"]
+    assert len(stored) == 1
+    assert stored[0]["id"] == stroke_id
+    assert len(stored[0]["points"]) == 2
+
+    # 3. Late joiner (Student 2) connects and receives stored stroke
+    sid_s2 = "sid_s2_air_late"
+    assert await connect(sid_s2, {}, auth={"token": student_token2}) is True
+    emitted_events.clear()
+    await join_session(sid_s2, {"sessionId": session_id})
+
+    # Late joiner should receive air_stroke_start, points, and end targeted to sid_s2
+    late_starts = [e for e in emitted_events if e["event"] == "air_stroke_start" and e.get("to") == sid_s2]
+    assert len(late_starts) == 1
+    assert late_starts[0]["data"]["id"] == stroke_id
+
+    late_points = [e for e in emitted_events if e["event"] == "air_stroke_points" and e.get("to") == sid_s2]
+    assert len(late_points) == 1
+    assert len(late_points[0]["data"]["points"]) == 2
+
+    late_ends = [e for e in emitted_events if e["event"] == "air_stroke_end" and e.get("to") == sid_s2]
+    assert len(late_ends) == 1
+
+    # 4. Student 1 adds a second stroke, then undos it
+    stroke_id_2 = "stroke-second-456"
+    await air_stroke_start(sid_s1, {
+        "sessionId": session_id,
+        "id": stroke_id_2,
+        "color": "#ff00ff",
+        "width": 2,
+        "by": s1_user_id,
+        "name": "Student One",
+    })
+    await air_stroke_points(sid_s1, {
+        "sessionId": session_id,
+        "id": stroke_id_2,
+        "points": [[1.0, 1.0, 1.0]],
+    })
+    await air_stroke_end(sid_s1, {"sessionId": session_id, "id": stroke_id_2})
+    assert len(room_state[session_id]["air_strokes"]) == 2
+
+    emitted_events.clear()
+    await air_undo(sid_s1, {"sessionId": session_id, "by": s1_user_id})
+    undo_emits = [e for e in emitted_events if e["event"] == "air_undo"]
+    assert len(undo_emits) == 1
+    assert undo_emits[0]["skip_sid"] == sid_s1
+    assert len(room_state[session_id]["air_strokes"]) == 1
+    assert room_state[session_id]["air_strokes"][0]["id"] == stroke_id
+
+    # 5. Non-host attempts air_clear with all=true (should get error event)
+    emitted_events.clear()
+    await air_clear(sid_s1, {"sessionId": session_id, "by": s1_user_id, "all": True})
+    err_emits = [e for e in emitted_events if e["event"] == "error"]
+    assert len(err_emits) == 1
+    assert len(room_state[session_id]["air_strokes"]) == 1
+
+    # Host performs air_clear with all=true (clears all)
+    emitted_events.clear()
+    host_user_id = socket_users[sid_host]["user_id"]
+    await air_clear(sid_host, {"sessionId": session_id, "by": host_user_id, "all": True})
+    clear_emits = [e for e in emitted_events if e["event"] == "air_clear"]
+    assert len(clear_emits) == 1
+    assert clear_emits[0]["data"]["all"] is True
+    assert len(room_state[session_id]["air_strokes"]) == 0
+
+    # Cleanup
+    await disconnect(sid_s2)
+    await disconnect(sid_s1)
+    await disconnect(sid_host)
+
